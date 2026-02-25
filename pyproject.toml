@@ -53,5 +53,8 @@ ignore = [
     "TC",      # flake8-type-checking — not worth the complexity
 ]
 
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "N802"]
+
 [tool.ruff.format]
 quote-style = "double"
