@@ -1,6 +1,6 @@
 [project]
 name = "constellate"
-version = "0.0.0"
+version = "v0.0.0"
 description = "Python asyncio-native cancellation context library"
 requires-python = ">=3.12"
 license = "MIT"
@@ -9,9 +9,7 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
 ]
-dependencies = [
-    "anyio>=4.12.1",
-]
+dependencies = []
 
 [build-system]
 requires = ["hatchling"]
@@ -21,6 +19,9 @@ build-backend = "hatchling.build"
 dev = [
     "mypy>=1.15.0",
     "pre-commit>=4.2.0",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.25",
+    "pytest-cov>=6.0",
     "ruff>=0.15.2",
 ]
 
