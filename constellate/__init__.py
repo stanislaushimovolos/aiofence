@@ -1,15 +1,13 @@
 from asyncio import Event
 
-from constellate.base import (
+from .core import (
     CancelReason,
     CancelSource,
     Context as _BaseContext,
     Guard,
     Scope,
-    ScopeResult,
-    SourceSet,
 )
-from constellate.sources import (
+from .sources import (
     EventCancelSource,
     EventGuard,
     EventTriggered,
@@ -20,7 +18,9 @@ from constellate.sources import (
 
 
 class Context(_BaseContext):
-    """Immutable description of cancellation sources, with builder methods."""
+    """
+    Immutable description of cancellation sources, with builder methods.
+    """
 
     def with_timeout(self, delay: float) -> "Context":
         return Context(*self.sources, TimeoutSource(delay))
@@ -38,8 +38,6 @@ __all__ = [
     "EventTriggered",
     "Guard",
     "Scope",
-    "ScopeResult",
-    "SourceSet",
     "TimeoutExpired",
     "TimeoutGuard",
     "TimeoutSource",

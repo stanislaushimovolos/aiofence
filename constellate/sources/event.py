@@ -4,18 +4,7 @@ import asyncio
 from asyncio import Event
 from typing import Callable
 
-from constellate.base import CancelReason, CancelSource, Guard
-
-
-class TimeoutExpired(CancelReason):
-    def __init__(self, delay: float) -> None:
-        self.delay = delay
-
-    def exception(self) -> TimeoutError:
-        return TimeoutError(f"timed out after {self.delay}s")
-
-    def __repr__(self) -> str:
-        return f"TimeoutExpired({self.delay})"
+from ..core import CancelReason, CancelSource, Guard
 
 
 class EventTriggered(CancelReason):
@@ -24,14 +13,6 @@ class EventTriggered(CancelReason):
 
     def __repr__(self) -> str:
         return f"EventTriggered({self.event!r})"
-
-
-class TimeoutGuard(Guard):
-    def __init__(self, handle: asyncio.TimerHandle) -> None:
-        self._handle = handle
-
-    def disarm(self) -> None:
-        self._handle.cancel()
 
 
 class EventGuard(Guard):
@@ -48,25 +29,6 @@ class EventGuard(Guard):
             self._fut.cancel()
 
 
-class TimeoutSource(CancelSource):
-    def __init__(self, delay: float) -> None:
-        self._delay = delay
-
-    def check(self) -> CancelReason | None:
-        if self._delay <= 0:
-            return TimeoutExpired(self._delay)
-        return None
-
-    def arm(self, on_cancel: Callable[[CancelReason], None]) -> Guard:
-        loop = asyncio.get_running_loop()
-        handle = loop.call_at(
-            loop.time() + self._delay,
-            on_cancel,
-            TimeoutExpired(self._delay),
-        )
-        return TimeoutGuard(handle)
-
-
 class EventCancelSource(CancelSource):
     def __init__(self, event: Event) -> None:
         self._event = event
@@ -80,6 +42,8 @@ class EventCancelSource(CancelSource):
         loop = asyncio.get_running_loop()
         fut = loop.create_future()
         reason = EventTriggered(self._event)
-        fut.add_done_callback(lambda f: on_cancel(reason) if not f.cancelled() else None)
+        fut.add_done_callback(
+            lambda f: on_cancel(reason) if not f.cancelled() else None
+        )
         self._event._waiters.append(fut)
         return EventGuard(self._event, fut)
