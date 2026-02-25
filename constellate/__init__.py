@@ -1,46 +1,49 @@
 from asyncio import Event
 
 from .core import (
-    Cancellation,
     CancelReason,
-    CancelSource,
+    CancelToken,
     CancelType,
-    Guard,
     Scope,
+    Trigger,
+    TriggerHandle,
 )
-from .core import (
-    Context as _BaseContext,
-)
-from .sources import (
-    EventCancelSource,
-    EventGuard,
-    TimeoutGuard,
-    TimeoutSource,
+from .triggers import (
+    EventHandle,
+    EventTrigger,
+    TimeoutHandle,
+    TimeoutTrigger,
 )
 
 
-class Context(_BaseContext):
+class Context:
     """
     Immutable description of cancellation sources, with builder methods.
     """
 
+    def __init__(self, *sources: Trigger) -> None:
+        self.sources = sources
+
     def with_timeout(self, delay: float) -> "Context":
-        return Context(*self.sources, TimeoutSource(delay))
+        return Context(*self.sources, TimeoutTrigger(delay))
 
     def with_cancel_on(self, event: Event) -> "Context":
-        return Context(*self.sources, EventCancelSource(event))
+        return Context(*self.sources, EventTrigger(event))
+
+    def scope(self) -> Scope:
+        return Scope(*self.sources)
 
 
 __all__ = [
     "CancelReason",
-    "CancelSource",
+    "CancelToken",
     "CancelType",
-    "Cancellation",
     "Context",
-    "EventCancelSource",
-    "EventGuard",
-    "Guard",
+    "EventHandle",
+    "EventTrigger",
     "Scope",
-    "TimeoutGuard",
-    "TimeoutSource",
+    "TimeoutHandle",
+    "TimeoutTrigger",
+    "Trigger",
+    "TriggerHandle",
 ]

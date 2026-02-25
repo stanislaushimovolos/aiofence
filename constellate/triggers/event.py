@@ -4,10 +4,10 @@ import asyncio
 from asyncio import Event
 from collections.abc import Callable
 
-from constellate.core import CancelReason, CancelSource, CancelType, Guard
+from constellate.core import CancelReason, CancelType, Trigger, TriggerHandle
 
 
-class EventGuard(Guard):
+class EventHandle(TriggerHandle):
     def __init__(self, event: Event, fut: asyncio.Future[None]) -> None:
         self._event = event
         self._fut = fut
@@ -18,7 +18,7 @@ class EventGuard(Guard):
             self._fut.cancel()
 
 
-class EventCancelSource(CancelSource):
+class EventTrigger(Trigger):
     def __init__(self, event: Event) -> None:
         self._event = event
 
@@ -33,7 +33,7 @@ class EventCancelSource(CancelSource):
             return self._reason()
         return None
 
-    def arm(self, on_cancel: Callable[[CancelReason], None]) -> Guard:
+    def arm(self, on_cancel: Callable[[CancelReason], None]) -> TriggerHandle:
         loop = asyncio.get_running_loop()
         fut = loop.create_future()
         reason = self._reason()
@@ -41,4 +41,4 @@ class EventCancelSource(CancelSource):
             lambda f: on_cancel(reason) if not f.cancelled() else None
         )
         self._event._waiters.append(fut)
-        return EventGuard(self._event, fut)
+        return EventHandle(self._event, fut)

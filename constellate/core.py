@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -18,37 +19,25 @@ class CancelReason:
     cancel_type: CancelType
 
 
-class Guard:
+class TriggerHandle(ABC):
     """
     Handle to an armed cancel source. Knows how to disarm itself.
     """
 
-    def disarm(self) -> None:
-        raise NotImplementedError
+    @abstractmethod
+    def disarm(self) -> None: ...
 
 
-class CancelSource:
+class Trigger(ABC):
     """
-    Describes a cancellation trigger. Produces a Guard when armed.
-    """
-
-    def check(self) -> CancelReason | None:
-        """
-        Pre-check: is this source already triggered?
-        """
-        return None
-
-    def arm(self, on_cancel: Callable[[CancelReason], None]) -> Guard:
-        raise NotImplementedError
-
-
-class Context:
-    """
-    Immutable description of cancellation sources.
+    Describes a cancellation trigger. Produces a TriggerHandle when armed.
     """
 
-    def __init__(self, *sources: CancelSource) -> None:
-        self.sources = tuple(sources)
+    @abstractmethod
+    def check(self) -> CancelReason | None: ...
+
+    @abstractmethod
+    def arm(self, on_cancel: Callable[[CancelReason], None]) -> TriggerHandle: ...
 
 
 class Scope:
@@ -56,17 +45,18 @@ class Scope:
     Binds a Context to the running task. Owns all cancellation logic.
     """
 
-    def __init__(self, ctx: Context) -> None:
-        self._ctx = ctx
+    def __init__(self, *sources: Trigger) -> None:
+        self._sources = sources
         self._task: asyncio.Task[Any] | None = None
-        self._guards: list[Guard] = []
+        self._guards: list[TriggerHandle] = []
         self._cancel_reasons: list[CancelReason] = []
-        self._cancellation: Cancellation | None = None
+        self._cancel_token: CancelToken | None = None
+        self._cancelling: int | None = None
         self._armed = False
 
     @property
     def cancelled(self) -> bool:
-        return self._cancellation is not None
+        return self._cancel_token is not None
 
     @property
     def reasons(self) -> list[CancelReason]:
@@ -78,8 +68,9 @@ class Scope:
             raise RuntimeError("Scope must be used inside a task")
 
         self._task = task
+        self._cancelling = task.cancelling()
 
-        for source in self._ctx.sources:
+        for source in self._sources:
             reason = source.check()
             if reason is not None:
                 self._cancel_reasons.append(reason)
@@ -88,7 +79,7 @@ class Scope:
             self._cancel()
         else:
             self._guards = [
-                source.arm(self._request_cancellation) for source in self._ctx.sources
+                source.arm(self._request_cancellation) for source in self._sources
             ]
             self._armed = True
 
@@ -104,24 +95,28 @@ class Scope:
             for guard in self._guards:
                 guard.disarm()
 
-        if self._cancellation is None:
+        if self._cancel_token is None:
             return None
 
-        return self._cancellation.resolve(exc_type, exc_val)
+        return self._cancel_token.resolve(exc_type, exc_val)
 
     def _request_cancellation(self, reason: CancelReason) -> None:
         self._cancel_reasons.append(reason)
         self._cancel()
 
     def _cancel(self) -> None:
-        if self._cancellation is None and self._task is not None:
-            reason = self._cancel_reasons[0]
-            cancelling = self._task.cancelling()
-            self._task.cancel(msg=reason.message)
-            self._cancellation = Cancellation(self._task, reason, cancelling)
+        if self._cancel_token is not None:
+            return
+
+        if self._task is None or self._cancelling is None:
+            raise RuntimeError("Scope._cancel() called before __enter__")
+
+        reason = self._cancel_reasons[0]
+        self._task.cancel(msg=reason.message)
+        self._cancel_token = CancelToken(self._task, reason, self._cancelling)
 
 
-class Cancellation:
+class CancelToken:
     """
     Encapsulates one cancel/uncancel cycle using asyncio's counter protocol.
     """
@@ -144,6 +139,7 @@ class Cancellation:
                 if self._reason.cancel_type is CancelType.TIMEOUT:
                     raise TimeoutError(self._reason.message) from exc_val
                 return None
+
             if self._reason.cancel_type is CancelType.TIMEOUT and exc_val is not None:
                 _insert_timeout_error(exc_val, self._reason.message)
                 if isinstance(exc_val, ExceptionGroup):

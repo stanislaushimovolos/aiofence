@@ -3,10 +3,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 
-from constellate.core import CancelReason, CancelSource, CancelType, Guard
+from constellate.core import CancelReason, CancelType, Trigger, TriggerHandle
 
 
-class TimeoutGuard(Guard):
+class TimeoutHandle(TriggerHandle):
     def __init__(self, handle: asyncio.TimerHandle) -> None:
         self._handle = handle
 
@@ -14,7 +14,7 @@ class TimeoutGuard(Guard):
         self._handle.cancel()
 
 
-class TimeoutSource(CancelSource):
+class TimeoutTrigger(Trigger):
     def __init__(self, delay: float) -> None:
         self._delay = delay
 
@@ -29,7 +29,7 @@ class TimeoutSource(CancelSource):
             return self._reason()
         return None
 
-    def arm(self, on_cancel: Callable[[CancelReason], None]) -> Guard:
+    def arm(self, on_cancel: Callable[[CancelReason], None]) -> TriggerHandle:
         loop = asyncio.get_running_loop()
         reason = self._reason()
         handle = loop.call_at(
@@ -37,4 +37,4 @@ class TimeoutSource(CancelSource):
             on_cancel,
             reason,
         )
-        return TimeoutGuard(handle)
+        return TimeoutHandle(handle)
