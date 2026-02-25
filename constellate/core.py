@@ -67,8 +67,22 @@ class Fence:
         self._cancel_token: _CancelToken | None = None
         self._cancelling: int | None = None
         self._armed = False
+        self._exited = False
+
+    @property
+    def cancelled(self) -> bool:
+        return len(self._cancel_reasons) > 0
+
+    @property
+    def reasons(self) -> tuple[CancelReason, ...]:
+        return tuple(self._cancel_reasons)
 
     def __enter__(self) -> Self:
+        if self._exited:
+            raise RuntimeError("Fence cannot be reused")
+        if self._current_task is not None:
+            raise RuntimeError("Fence has already been entered")
+
         task = asyncio.current_task()
         if task is None:
             raise RuntimeError("Fence must be used inside a task")
@@ -97,6 +111,7 @@ class Fence:
         exc_val: BaseException | None,
         exc_tb: object,
     ) -> bool | None:
+        self._exited = True
         if self._armed:
             for guard in self._exit_handlers:
                 guard.disarm()
@@ -140,17 +155,25 @@ class _CancelToken:
         exc_type: type[BaseException] | None,
         exc_val: BaseException | None,
     ) -> bool | None:
-        if exc_type is None:
-            return None
-
         # adopted from here
         # https://github.com/python/cpython/blob/v3.14.3/Lib/asyncio/timeouts.py#L110
-        if self._task.uncancel() <= self._cancelling:
+        remaining = self._task.uncancel()
+        if remaining <= self._cancelling and exc_type is not None:
             if issubclass(exc_type, asyncio.CancelledError):
-                # override cancel error with TimeoutError
                 if self._reason.cancel_type is CancelType.TIMEOUT:
                     raise TimeoutError(self._reason.message) from exc_val
-                return None
+
+                # CANCELLED type: suppress CancelledError instead of propagating.
+                #
+                # Why suppress? We already called uncancel() above, restoring
+                # the counter to its pre-fence baseline. If we let CancelledError
+                # propagate, outer scopes (asyncio.timeout, parent Fence) would
+                # call uncancel() again — over-decrementing the counter and
+                # incorrectly claiming ownership of a cancel they didn't cause.
+                #
+                # This follows anyio's move_on_after pattern: suppress the
+                # error, caller checks fence.cancelled / fence.reasons.
+                return True
 
             if self._reason.cancel_type is CancelType.TIMEOUT and exc_val is not None:
                 # insert TimeoutError in exceptions stack

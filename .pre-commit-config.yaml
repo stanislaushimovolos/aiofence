@@ -14,18 +14,28 @@ repos:
       - id: no-commit-to-branch
         args: ['--branch', 'main']
 
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.2
+  - repo: local
     hooks:
       - id: ruff-check
-        args: [--fix]
-      - id: ruff-format
+        name: ruff check
+        entry: uv run ruff check --force-exclude --fix --exit-non-zero-on-fix
+        require_serial: true
+        language: system
+        types: [python]
 
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.19.1
-    hooks:
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format --force-exclude --exit-non-zero-on-format
+        require_serial: true
+        language: system
+        types: [python]
+
       - id: mypy
-        additional_dependencies: [anyio>=4.12.1]
+        name: mypy
+        entry: uv run mypy constellate
+        require_serial: true
+        language: system
+        pass_filenames: false
 
   - repo: https://github.com/compilerla/conventional-pre-commit
     rev: v4.4.0

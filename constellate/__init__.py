@@ -36,7 +36,6 @@ class Context:
 __all__ = [
     "CancelReason",
     "CancelType",
-    "Context",
     "EventHandle",
     "EventTrigger",
     "Fence",
