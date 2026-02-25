@@ -19,36 +19,50 @@ class CancelReason:
     cancel_type: CancelType
 
 
-class TriggerHandle(ABC):
-    """
-    Handle to an armed cancel source. Knows how to disarm itself.
-    """
-
-    @abstractmethod
-    def disarm(self) -> None: ...
+CancelCallback = Callable[[CancelReason], None]
 
 
 class Trigger(ABC):
     """
-    Describes a cancellation trigger. Produces a TriggerHandle when armed.
+    Defines a cancellation condition.
+
+    `check()` — synchronous pre-check; if the condition is already met,
+    cancellation is scheduled immediately without arming.
+
+    `arm(callback)` — starts async monitoring (callbacks, timers, etc).
+    Returns a `TriggerHandle` responsible for cleanup.
     """
 
     @abstractmethod
     def check(self) -> CancelReason | None: ...
 
     @abstractmethod
-    def arm(self, on_cancel: Callable[[CancelReason], None]) -> TriggerHandle: ...
+    def arm(self, on_cancel: CancelCallback) -> TriggerHandle: ...
+
+
+class TriggerHandle(ABC):
+    """
+    A live cancellation watch returned by `Trigger.arm()`.
+
+    `disarm()` — stops monitoring and cleans up resources.
+    """
+
+    @abstractmethod
+    def disarm(self) -> None: ...
 
 
 class Fence:
     """
-    Binds a Context to the running task. Owns all cancellation logic.
+    Sync context manager that arms triggers against the current task.
+
+    On enter — checks pre-conditions, then arms all triggers.
+    On exit — disarms triggers and resolves any cancellation.
     """
 
     def __init__(self, *triggers: Trigger) -> None:
         self._triggers = triggers
-        self._task: asyncio.Task[Any] | None = None
-        self._guards: list[TriggerHandle] = []
+        self._current_task: asyncio.Task[Any] | None = None
+        self._exit_handlers: list[TriggerHandle] = []
         self._cancel_reasons: list[CancelReason] = []
         self._cancel_token: _CancelToken | None = None
         self._cancelling: int | None = None
@@ -59,7 +73,7 @@ class Fence:
         if task is None:
             raise RuntimeError("Fence must be used inside a task")
 
-        self._task = task
+        self._current_task = task
         self._cancelling = task.cancelling()
 
         for source in self._triggers:
@@ -70,7 +84,7 @@ class Fence:
         if self._cancel_reasons:
             self._cancel()
         else:
-            self._guards = [
+            self._exit_handlers = [
                 source.arm(self._request_cancellation) for source in self._triggers
             ]
             self._armed = True
@@ -84,13 +98,14 @@ class Fence:
         exc_tb: object,
     ) -> bool | None:
         if self._armed:
-            for guard in self._guards:
+            for guard in self._exit_handlers:
                 guard.disarm()
 
+        # no cancellation occurred
         if self._cancel_token is None:
             return None
 
-        return self._cancel_token.resolve(exc_type, exc_val)
+        return self._cancel_token.resolve_exception(exc_type, exc_val)
 
     def _request_cancellation(self, reason: CancelReason) -> None:
         self._cancel_reasons.append(reason)
@@ -100,12 +115,12 @@ class Fence:
         if self._cancel_token is not None:
             return
 
-        if self._task is None or self._cancelling is None:
+        if self._current_task is None or self._cancelling is None:
             raise RuntimeError("Fence._cancel() called before __enter__")
 
         reason = self._cancel_reasons[0]
-        self._task.cancel(msg=reason.message)
-        self._cancel_token = _CancelToken(self._task, reason, self._cancelling)
+        self._current_task.cancel(msg=reason.message)
+        self._cancel_token = _CancelToken(self._current_task, reason, self._cancelling)
 
 
 class _CancelToken:
@@ -120,19 +135,25 @@ class _CancelToken:
         self._reason = reason
         self._cancelling = cancelling
 
-    def resolve(
-        self, exc_type: type[BaseException] | None, exc_val: BaseException | None
+    def resolve_exception(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
     ) -> bool | None:
         if exc_type is None:
             return None
 
+        # adopted from here
+        # https://github.com/python/cpython/blob/v3.14.3/Lib/asyncio/timeouts.py#L110
         if self._task.uncancel() <= self._cancelling:
             if issubclass(exc_type, asyncio.CancelledError):
+                # override cancel error with TimeoutError
                 if self._reason.cancel_type is CancelType.TIMEOUT:
                     raise TimeoutError(self._reason.message) from exc_val
                 return None
 
             if self._reason.cancel_type is CancelType.TIMEOUT and exc_val is not None:
+                # insert TimeoutError in exceptions stack
                 _insert_timeout_error(exc_val, self._reason.message)
                 if isinstance(exc_val, ExceptionGroup):
                     for exc in exc_val.exceptions:
@@ -141,6 +162,8 @@ class _CancelToken:
 
 
 def _insert_timeout_error(exc_val: BaseException, message: str) -> None:
+    # adopted from here
+    # https://github.com/python/cpython/blob/v3.14.3/Lib/asyncio/timeouts.py#L133
     while exc_val.__context__ is not None:
         if isinstance(exc_val.__context__, asyncio.CancelledError):
             te = TimeoutError(message)
