@@ -1,20 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Callable
+from collections.abc import Callable
 
-from ..core import CancelReason, CancelSource, Guard
-
-
-class TimeoutExpired(CancelReason):
-    def __init__(self, delay: float) -> None:
-        self.delay = delay
-
-    def exception(self) -> TimeoutError:
-        return TimeoutError(f"timed out after {self.delay}s")
-
-    def __repr__(self) -> str:
-        return f"TimeoutExpired({self.delay})"
+from constellate.core import CancelReason, CancelSource, CancelType, Guard
 
 
 class TimeoutGuard(Guard):
@@ -29,16 +18,23 @@ class TimeoutSource(CancelSource):
     def __init__(self, delay: float) -> None:
         self._delay = delay
 
+    def _reason(self) -> CancelReason:
+        return CancelReason(
+            message=f"timed out after {self._delay}s",
+            cancel_type=CancelType.TIMEOUT,
+        )
+
     def check(self) -> CancelReason | None:
         if self._delay <= 0:
-            return TimeoutExpired(self._delay)
+            return self._reason()
         return None
 
     def arm(self, on_cancel: Callable[[CancelReason], None]) -> Guard:
         loop = asyncio.get_running_loop()
+        reason = self._reason()
         handle = loop.call_at(
             loop.time() + self._delay,
             on_cancel,
-            TimeoutExpired(self._delay),
+            reason,
         )
         return TimeoutGuard(handle)

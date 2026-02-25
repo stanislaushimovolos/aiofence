@@ -1,19 +1,21 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Callable
+from collections.abc import Callable
+from dataclasses import dataclass
+from enum import Enum, auto
+from typing import Any, Self
 
 
+class CancelType(Enum):
+    CANCELLED = auto()
+    TIMEOUT = auto()
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
 class CancelReason:
-    """
-    Base class for why a context was cancelled.
-    """
-
-    def exception(self) -> BaseException | None:
-        """
-        The exception this reason resolves to, or None to suppress silently.
-        """
-        return None
+    message: str
+    cancel_type: CancelType
 
 
 class Guard:
@@ -40,7 +42,6 @@ class CancelSource:
         raise NotImplementedError
 
 
-
 class Context:
     """
     Immutable description of cancellation sources.
@@ -57,28 +58,26 @@ class Scope:
 
     def __init__(self, ctx: Context) -> None:
         self._ctx = ctx
-        self._task: asyncio.Task | None = None
-        self._cancel_msg: object | None = None
+        self._task: asyncio.Task[Any] | None = None
         self._guards: list[Guard] = []
         self._cancel_reasons: list[CancelReason] = []
+        self._cancellation: Cancellation | None = None
         self._armed = False
-        self._cancelled = False
 
     @property
     def cancelled(self) -> bool:
-        return len(self._cancel_reasons) > 0
+        return self._cancellation is not None
 
     @property
     def reasons(self) -> list[CancelReason]:
         return list(self._cancel_reasons)
 
-    def __enter__(self) -> Scope:
+    def __enter__(self) -> Self:
         task = asyncio.current_task()
         if task is None:
             raise RuntimeError("Scope must be used inside a task")
 
         self._task = task
-        self._cancel_msg = object()
 
         for source in self._ctx.sources:
             reason = source.check()
@@ -95,35 +94,69 @@ class Scope:
 
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> bool | None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
+    ) -> bool | None:
         if self._armed:
             for guard in self._guards:
                 guard.disarm()
 
-        if not self._cancel_reasons:
+        if self._cancellation is None:
             return None
 
-        if exc_type is asyncio.CancelledError and _is_our_cancellation(
-            exc_val, self._cancel_msg
-        ):
-            exc = self._cancel_reasons[0].exception()
-            if exc is not None:
-                raise exc from exc_val
-            return True
-
-        return None
+        return self._cancellation.resolve(exc_type, exc_val)
 
     def _request_cancellation(self, reason: CancelReason) -> None:
         self._cancel_reasons.append(reason)
         self._cancel()
 
     def _cancel(self) -> None:
-        if not self._cancelled:
-            self._cancelled = True
-            self._task.cancel(msg=self._cancel_msg)
+        if self._cancellation is None and self._task is not None:
+            reason = self._cancel_reasons[0]
+            cancelling = self._task.cancelling()
+            self._task.cancel(msg=reason.message)
+            self._cancellation = Cancellation(self._task, reason, cancelling)
 
 
-def _is_our_cancellation(exc: BaseException | None, msg: object | None) -> bool:
-    if exc is None or msg is None:
-        return False
-    return exc.args and exc.args[0] is msg
+class Cancellation:
+    """
+    Encapsulates one cancel/uncancel cycle using asyncio's counter protocol.
+    """
+
+    def __init__(
+        self, task: asyncio.Task[Any], reason: CancelReason, cancelling: int
+    ) -> None:
+        self._task = task
+        self._reason = reason
+        self._cancelling = cancelling
+
+    def resolve(
+        self, exc_type: type[BaseException] | None, exc_val: BaseException | None
+    ) -> bool | None:
+        if exc_type is None:
+            return None
+
+        if self._task.uncancel() <= self._cancelling:
+            if issubclass(exc_type, asyncio.CancelledError):
+                if self._reason.cancel_type is CancelType.TIMEOUT:
+                    raise TimeoutError(self._reason.message) from exc_val
+                return None
+            if self._reason.cancel_type is CancelType.TIMEOUT and exc_val is not None:
+                _insert_timeout_error(exc_val, self._reason.message)
+                if isinstance(exc_val, ExceptionGroup):
+                    for exc in exc_val.exceptions:
+                        _insert_timeout_error(exc, self._reason.message)
+        return None
+
+
+def _insert_timeout_error(exc_val: BaseException, message: str) -> None:
+    while exc_val.__context__ is not None:
+        if isinstance(exc_val.__context__, asyncio.CancelledError):
+            te = TimeoutError(message)
+            te.__context__ = te.__cause__ = exc_val.__context__
+            exc_val.__context__ = te
+            break
+        exc_val = exc_val.__context__

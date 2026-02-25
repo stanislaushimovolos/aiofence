@@ -5,7 +5,7 @@
 - Type hints everywhere
 - Short focused functions; high-level first, helpers later
 - f-strings, double quotes
-- Relative imports inside the package, absolute otherwise
+m- Relative imports inside the package, absolute otherwise. Only one-level relative imports (`from .core`, not `from ..core`)
 - Newspaper-style: public API at the top, private helpers below
 - Composition over inheritance
 

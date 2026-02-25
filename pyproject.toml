@@ -19,5 +19,38 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
+    "mypy>=1.15.0",
+    "pre-commit>=4.2.0",
     "ruff>=0.15.2",
 ]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    "ALL",  # enable everything, then exclude what doesn't fit
+]
+ignore = [
+    "D",       # pydocstyle — we use minimal docstrings per project conventions
+    "ANN",     # flake8-annotations — we already have type hints, these rules are noisy
+    "ERA",     # eradicate — flags commented-out code, too many false positives
+    "T20",     # flake8-print — print() is fine during development
+    "FIX",     # flake8-fixme — TODO/FIXME comments are OK
+    "TD",      # flake8-todos — don't enforce TODO format
+    "CPY",     # flake8-copyright — no copyright headers needed
+    "INP",     # flake8-no-pep420 — false positives on namespace packages
+    "COM812",  # trailing comma — conflicts with ruff formatter
+    "EM101",   # string literal in exception — too pedantic for simple errors
+    "TRY003",  # long exception messages — same as above
+    "SLF001",  # private member access — intentional for asyncio internals
+    "TC",      # flake8-type-checking — not worth the complexity
+]
+
+[tool.ruff.format]
+quote-style = "double"

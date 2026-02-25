@@ -1,17 +1,19 @@
 from asyncio import Event
 
 from .core import (
+    Cancellation,
     CancelReason,
     CancelSource,
-    Context as _BaseContext,
+    CancelType,
     Guard,
     Scope,
+)
+from .core import (
+    Context as _BaseContext,
 )
 from .sources import (
     EventCancelSource,
     EventGuard,
-    EventTriggered,
-    TimeoutExpired,
     TimeoutGuard,
     TimeoutSource,
 )
@@ -32,13 +34,13 @@ class Context(_BaseContext):
 __all__ = [
     "CancelReason",
     "CancelSource",
+    "CancelType",
+    "Cancellation",
     "Context",
     "EventCancelSource",
     "EventGuard",
-    "EventTriggered",
     "Guard",
     "Scope",
-    "TimeoutExpired",
     "TimeoutGuard",
     "TimeoutSource",
 ]
