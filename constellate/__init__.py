@@ -2,9 +2,8 @@ from asyncio import Event
 
 from .core import (
     CancelReason,
-    CancelToken,
     CancelType,
-    Scope,
+    Fence,
     Trigger,
     TriggerHandle,
 )
@@ -30,18 +29,17 @@ class Context:
     def with_cancel_on(self, event: Event) -> "Context":
         return Context(*self.sources, EventTrigger(event))
 
-    def scope(self) -> Scope:
-        return Scope(*self.sources)
+    def fence(self) -> Fence:
+        return Fence(*self.sources)
 
 
 __all__ = [
     "CancelReason",
-    "CancelToken",
     "CancelType",
     "Context",
     "EventHandle",
     "EventTrigger",
-    "Scope",
+    "Fence",
     "TimeoutHandle",
     "TimeoutTrigger",
     "Trigger",

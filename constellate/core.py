@@ -40,37 +40,29 @@ class Trigger(ABC):
     def arm(self, on_cancel: Callable[[CancelReason], None]) -> TriggerHandle: ...
 
 
-class Scope:
+class Fence:
     """
     Binds a Context to the running task. Owns all cancellation logic.
     """
 
-    def __init__(self, *sources: Trigger) -> None:
-        self._sources = sources
+    def __init__(self, *triggers: Trigger) -> None:
+        self._triggers = triggers
         self._task: asyncio.Task[Any] | None = None
         self._guards: list[TriggerHandle] = []
         self._cancel_reasons: list[CancelReason] = []
-        self._cancel_token: CancelToken | None = None
+        self._cancel_token: _CancelToken | None = None
         self._cancelling: int | None = None
         self._armed = False
-
-    @property
-    def cancelled(self) -> bool:
-        return self._cancel_token is not None
-
-    @property
-    def reasons(self) -> list[CancelReason]:
-        return list(self._cancel_reasons)
 
     def __enter__(self) -> Self:
         task = asyncio.current_task()
         if task is None:
-            raise RuntimeError("Scope must be used inside a task")
+            raise RuntimeError("Fence must be used inside a task")
 
         self._task = task
         self._cancelling = task.cancelling()
 
-        for source in self._sources:
+        for source in self._triggers:
             reason = source.check()
             if reason is not None:
                 self._cancel_reasons.append(reason)
@@ -79,7 +71,7 @@ class Scope:
             self._cancel()
         else:
             self._guards = [
-                source.arm(self._request_cancellation) for source in self._sources
+                source.arm(self._request_cancellation) for source in self._triggers
             ]
             self._armed = True
 
@@ -109,14 +101,14 @@ class Scope:
             return
 
         if self._task is None or self._cancelling is None:
-            raise RuntimeError("Scope._cancel() called before __enter__")
+            raise RuntimeError("Fence._cancel() called before __enter__")
 
         reason = self._cancel_reasons[0]
         self._task.cancel(msg=reason.message)
-        self._cancel_token = CancelToken(self._task, reason, self._cancelling)
+        self._cancel_token = _CancelToken(self._task, reason, self._cancelling)
 
 
-class CancelToken:
+class _CancelToken:
     """
     Encapsulates one cancel/uncancel cycle using asyncio's counter protocol.
     """
