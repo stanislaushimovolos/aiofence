@@ -7,6 +7,7 @@ from .core import (
     Trigger,
     TriggerHandle,
 )
+from .errors import FenceCancelled, FenceTimeout
 from .triggers import (
     EventHandle,
     EventTrigger,
@@ -36,9 +37,12 @@ class Context:
 __all__ = [
     "CancelReason",
     "CancelType",
+    "Context",
     "EventHandle",
     "EventTrigger",
     "Fence",
+    "FenceCancelled",
+    "FenceTimeout",
     "TimeoutHandle",
     "TimeoutTrigger",
     "Trigger",
