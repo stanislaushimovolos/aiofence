@@ -25,7 +25,7 @@ m- Relative imports inside the package, absolute otherwise. Only one-level relat
 
 - One behavior per test
 - AAA pattern (Arrange -> Act -> Assert)
-- Naming: `test__Subject__Condition__ExpectedResult`
+- Naming: `test__subject__when_condition__then_expected_result`
 - `conftest.py` only for shared fixtures; otherwise keep fixtures in local test files
 
 ## Git

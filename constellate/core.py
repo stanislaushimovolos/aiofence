@@ -98,12 +98,16 @@ class Fence:
                 self._cancel_reasons.append(reason)
 
         if self._cancel_reasons:
-            self._cancel()
-        else:
-            self._exit_handlers = [
-                source.arm(self._request_cancellation) for source in self._triggers
-            ]
-            self._armed = True
+            reason = self._cancel_reasons[0]
+            if reason.cancel_type is CancelType.TIMEOUT:
+                raise FenceTimeout(self.reasons)
+
+            raise FenceCancelled(self.reasons)
+
+        self._exit_handlers = [
+            source.arm(self._request_cancellation) for source in self._triggers
+        ]
+        self._armed = True
 
         return self
 
@@ -157,8 +161,6 @@ class _CancelToken:
         self._task = task
         self._reason = reason
         self._cancelling = cancelling
-        self._handle: asyncio.Handle | None = None
-        self._fired = False
 
     @classmethod
     def schedule(
@@ -168,7 +170,7 @@ class _CancelToken:
         cancelling: int,
     ) -> _CancelToken:
         token = cls(task, reason, cancelling)
-        token._handle = asyncio.get_running_loop().call_soon(token._fire)
+        asyncio.get_running_loop().call_soon(token._fire)
         return token
 
     def resolve(
@@ -177,12 +179,6 @@ class _CancelToken:
         exc_val: BaseException | None,
         reasons: tuple[CancelReason, ...],
     ) -> None:
-        # means we didn't enter event loop scheduler within our context manager
-        if not self._fired:
-            assert self._handle is not None  # noqa: S101
-            self._handle.cancel()
-            return
-
         # adopted from here
         # https://github.com/python/cpython/blob/v3.14.3/Lib/asyncio/timeouts.py#L110
         remaining = self._task.uncancel()
@@ -200,7 +196,6 @@ class _CancelToken:
                         _insert_timeout_error(exc, reasons)
 
     def _fire(self) -> None:
-        self._fired = True
         self._task.cancel(msg=self._reason.message)
 
 
