@@ -1,5 +1,3 @@
-from asyncio import Event
-
 from .core import (
     CancelReason,
     CancelType,
@@ -15,29 +13,9 @@ from .triggers import (
     TimeoutTrigger,
 )
 
-
-class Context:
-    """
-    Immutable description of cancellation sources, with builder methods.
-    """
-
-    def __init__(self, *sources: Trigger) -> None:
-        self.sources = sources
-
-    def with_timeout(self, delay: float) -> "Context":
-        return Context(*self.sources, TimeoutTrigger(delay))
-
-    def with_cancel_on(self, event: Event) -> "Context":
-        return Context(*self.sources, EventTrigger(event))
-
-    def fence(self) -> Fence:
-        return Fence(*self.sources)
-
-
 __all__ = [
     "CancelReason",
     "CancelType",
-    "Context",
     "EventHandle",
     "EventTrigger",
     "Fence",

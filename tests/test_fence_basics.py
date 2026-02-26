@@ -28,7 +28,7 @@ async def test__fence__when_no_sources_sync__then_protocol_intact():
 
 async def test__fence__when_zero_timeout__then_body_does_not_execute_async():
     reached = False
-    with pytest.raises(FenceTimeout):  # noqa: PT012, SIM117
+    with pytest.raises(FenceTimeout):  # noqa: PT012
         with Fence(TimeoutTrigger(0)):
             await asyncio.sleep(0)
             reached = True
@@ -37,8 +37,9 @@ async def test__fence__when_zero_timeout__then_body_does_not_execute_async():
 
 async def test__fence__when_zero_timeout__then_body_does_not_execute_sync():
     reached = False
-    with pytest.raises(FenceTimeout), Fence(TimeoutTrigger(0)):
-        reached = True
+    with pytest.raises(FenceTimeout):
+        with Fence(TimeoutTrigger(0)):
+            reached = True
     assert not reached
 
 
@@ -47,8 +48,9 @@ async def test__fence__when_reenter__then_raises_runtime_error():
     with fence:
         await asyncio.sleep(0)
 
-    with pytest.raises(RuntimeError, match="cannot be reused"), fence:
-        pass
+    with pytest.raises(RuntimeError, match="cannot be reused"):
+        with fence:
+            pass
 
 
 def test__fence_timeout__when_raised__then_caught_by_timeout_error():

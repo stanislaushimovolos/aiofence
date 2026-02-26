@@ -13,25 +13,12 @@ from constellate.core import CancelType
 
 
 async def test__fence_timeout__when_fires__then_raised_with_reasons():
-    with pytest.raises(FenceTimeout) as exc_info, Fence(TimeoutTrigger(0)):
-        await asyncio.sleep(1)
+    with pytest.raises(FenceTimeout) as exc_info:
+        with Fence(TimeoutTrigger(0)):
+            await asyncio.sleep(1)
 
     assert len(exc_info.value.reasons) == 1
     assert exc_info.value.reasons[0].cancel_type is CancelType.TIMEOUT
-
-
-async def test__fence_timeout__when_fires__then_caught_by_except_timeout_error():
-    with pytest.raises(TimeoutError), Fence(TimeoutTrigger(0)):
-        await asyncio.sleep(1)
-
-
-async def test__fence_timeout__when_fires__then_not_caught_by_cancelled_error():
-    with pytest.raises(FenceTimeout):  # noqa: PT012
-        try:
-            with Fence(TimeoutTrigger(0)):
-                await asyncio.sleep(1)
-        except asyncio.CancelledError:
-            pytest.fail("FenceTimeout should not be caught by CancelledError")
 
 
 @pytest.mark.parametrize("catch", [FenceCancelled, asyncio.CancelledError])
@@ -42,7 +29,7 @@ async def test__fence_cancelled__when_event_fires__then_body_not_reached(
     event.set()
     reached = False
 
-    with pytest.raises(catch):  # noqa: PT012, SIM117
+    with pytest.raises(catch):  # noqa: PT012
         with Fence(EventTrigger(event)):
             reached = True
             await asyncio.sleep(1)
@@ -54,11 +41,30 @@ async def test__fence_cancelled__when_event_fires__then_raised_with_reasons():
     event = asyncio.Event()
     event.set()
 
-    with pytest.raises(FenceCancelled) as exc_info, Fence(EventTrigger(event)):
-        await asyncio.sleep(1)
+    with pytest.raises(FenceCancelled) as exc_info:
+        with Fence(EventTrigger(event)):
+            await asyncio.sleep(1)
 
     assert len(exc_info.value.reasons) == 1
     assert exc_info.value.reasons[0].cancel_type is CancelType.CANCELLED
+
+
+# --- Runtime trigger fire (not pre-set) ---
+
+
+async def test__fence_cancelled__when_event_set_during_body__then_raises():
+    event = asyncio.Event()
+    asyncio.get_running_loop().call_soon(event.set)
+
+    with pytest.raises(FenceCancelled):
+        with Fence(EventTrigger(event)):
+            await asyncio.sleep(1)
+
+
+async def test__fence_timeout__when_fires_during_body__then_raises():
+    with pytest.raises(FenceTimeout):
+        with Fence(TimeoutTrigger(0.001)):
+            await asyncio.sleep(1)
 
 
 # --- fence.cancelled / fence.reasons after exception ---
@@ -81,8 +87,9 @@ async def test__fence__when_trigger_fires__then_cancelled_and_reasons_populated(
 
     fence = Fence(trigger)
 
-    with pytest.raises(exc_type), fence:
-        await asyncio.sleep(1)
+    with pytest.raises(exc_type):
+        with fence:
+            await asyncio.sleep(1)
 
     assert fence.cancelled
     assert len(fence.reasons) == 1

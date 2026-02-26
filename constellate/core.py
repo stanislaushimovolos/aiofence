@@ -80,15 +80,11 @@ class Fence:
         return tuple(self._cancel_reasons)
 
     def __enter__(self) -> Self:
-        if self._exited:
+        if self._exited or self._current_task is not None:
             raise RuntimeError("Fence cannot be reused")
-        if self._current_task is not None:
-            raise RuntimeError("Fence has already been entered")
 
         task = asyncio.current_task()
-        if task is None:
-            raise RuntimeError("Fence must be used inside a task")
-
+        assert task is not None  # noqa: S101
         self._current_task = task
         self._cancelling = task.cancelling()
 
