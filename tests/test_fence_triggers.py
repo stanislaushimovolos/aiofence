@@ -1,95 +1,86 @@
 import asyncio
 
-import pytest
-
-from constellate import (
-    EventTrigger,
-    Fence,
-    FenceCancelled,
-    FenceTimeout,
-    TimeoutTrigger,
-)
+from constellate import EventTrigger, Fence, TimeoutTrigger
 from constellate.core import CancelType
 
-
-async def test__fence_timeout__when_fires__then_raised_with_reasons():
-    with pytest.raises(FenceTimeout) as exc_info:
-        with Fence(TimeoutTrigger(0)):
-            await asyncio.sleep(1)
-
-    assert len(exc_info.value.reasons) == 1
-    assert exc_info.value.reasons[0].cancel_type is CancelType.TIMEOUT
+# --- Pre-triggered ---
 
 
-@pytest.mark.parametrize("catch", [FenceCancelled, asyncio.CancelledError])
-async def test__fence_cancelled__when_event_fires__then_body_not_reached(
-    catch: type,
-):
+async def test__fence__when_timeout_pre_triggered__then_suppressed_with_reasons():
+    with Fence(TimeoutTrigger(0)) as fence:
+        await asyncio.sleep(1)
+
+    assert fence.cancelled
+    assert len(fence.reasons) == 1
+    assert fence.reasons[0].cancel_type is CancelType.TIMEOUT
+
+
+async def test__fence__when_event_pre_set__then_suppressed_and_cancelled():
+    event = asyncio.Event()
+    event.set()
+
+    with Fence(EventTrigger(event)) as fence:
+        await asyncio.sleep(1)
+
+    assert fence.cancelled
+    assert fence.reasons[0].cancel_type is CancelType.CANCELLED
+
+
+async def test__fence__when_event_pre_set__then_body_interrupted_at_await():
+    event = asyncio.Event()
+    event.set()
+    reached_before_await = False
+    reached_after_await = False
+
+    with Fence(EventTrigger(event)) as fence:
+        reached_before_await = True
+        await asyncio.sleep(0)
+        reached_after_await = True
+
+    assert fence.cancelled
+    assert reached_before_await
+    assert not reached_after_await
+
+
+async def test__fence__when_event_pre_set_sync_body__then_body_completes():
     event = asyncio.Event()
     event.set()
     reached = False
 
-    with pytest.raises(catch):  # noqa: PT012
-        with Fence(EventTrigger(event)):
-            reached = True
-            await asyncio.sleep(1)
+    with Fence(EventTrigger(event)) as fence:
+        reached = True
 
-    assert not reached
-
-
-async def test__fence_cancelled__when_event_fires__then_raised_with_reasons():
-    event = asyncio.Event()
-    event.set()
-
-    with pytest.raises(FenceCancelled) as exc_info:
-        with Fence(EventTrigger(event)):
-            await asyncio.sleep(1)
-
-    assert len(exc_info.value.reasons) == 1
-    assert exc_info.value.reasons[0].cancel_type is CancelType.CANCELLED
+    assert fence.cancelled
+    assert reached
 
 
 # --- Runtime trigger fire (not pre-set) ---
 
 
-async def test__fence_cancelled__when_event_set_during_body__then_raises():
+async def test__fence__when_event_set_during_body__then_suppressed():
     event = asyncio.Event()
     asyncio.get_running_loop().call_soon(event.set)
 
-    with pytest.raises(FenceCancelled):
-        with Fence(EventTrigger(event)):
-            await asyncio.sleep(1)
+    with Fence(EventTrigger(event)) as fence:
+        await asyncio.sleep(1)
+
+    assert fence.cancelled
 
 
-async def test__fence_timeout__when_fires_during_body__then_raises():
-    with pytest.raises(FenceTimeout):
-        with Fence(TimeoutTrigger(0.001)):
-            await asyncio.sleep(1)
+async def test__fence__when_timeout_fires__then_suppressed():
+    with Fence(TimeoutTrigger(0.001)) as fence:
+        await asyncio.sleep(1)
+
+    assert fence.cancelled
+    assert fence.reasons[0].cancel_type is CancelType.TIMEOUT
 
 
-# --- fence.cancelled / fence.reasons after exception ---
+# --- fence.cancelled / fence.reasons after suppression ---
 
 
-@pytest.mark.parametrize(
-    ("trigger", "exc_type"),
-    [
-        (TimeoutTrigger(0), FenceTimeout),
-        (EventTrigger(asyncio.Event()), FenceCancelled),
-    ],
-    ids=["timeout", "event"],
-)
-async def test__fence__when_trigger_fires__then_cancelled_and_reasons_populated(
-    trigger: TimeoutTrigger | EventTrigger,
-    exc_type: type,
-):
-    if isinstance(trigger, EventTrigger):
-        trigger._event.set()
-
-    fence = Fence(trigger)
-
-    with pytest.raises(exc_type):
-        with fence:
-            await asyncio.sleep(1)
+async def test__fence__when_trigger_fires__then_cancelled_and_reasons_populated():
+    with Fence(TimeoutTrigger(0.001)) as fence:
+        await asyncio.sleep(1)
 
     assert fence.cancelled
     assert len(fence.reasons) == 1
@@ -99,11 +90,12 @@ async def test__fence__when_trigger_fires__then_cancelled_and_reasons_populated(
 
 
 async def test__fence__when_inner_timeout_fires__then_outer_unaffected():
-    inner = Fence(TimeoutTrigger(0))
     outer = Fence(TimeoutTrigger(10))
+    inner = Fence(TimeoutTrigger(0.001))
 
-    with pytest.raises(FenceTimeout), outer, inner:
-        await asyncio.sleep(1)
+    with outer:
+        with inner:
+            await asyncio.sleep(1)
 
     assert inner.cancelled
     assert not outer.cancelled
@@ -114,8 +106,9 @@ async def test__fence__when_outer_timeout_fires__then_inner_doesnt_claim():
     outer = Fence(TimeoutTrigger(0.01))
     inner = Fence(EventTrigger(event))
 
-    with pytest.raises(FenceTimeout), outer, inner:
-        await asyncio.sleep(1)
+    with outer:
+        with inner:
+            await asyncio.sleep(1)
 
     assert outer.cancelled
     assert not inner.cancelled

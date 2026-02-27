@@ -7,8 +7,6 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Any, Self
 
-from .errors import FenceCancelled, FenceTimeout
-
 
 class CancelType(Enum):
     CANCELLED = auto()
@@ -57,8 +55,12 @@ class Fence:
     """
     Sync context manager that arms triggers against the current task.
 
-    On enter — checks pre-conditions, then arms all triggers.
-    On exit — disarms triggers and resolves any cancellation.
+    Suppression semantics (follows anyio CancelScope model):
+    __exit__ always suppresses CancelledError — never raises, never
+    propagates. Caller inspects `fence.cancelled` / `fence.reasons` after
+    the block. This keeps the cancel counter balanced and avoids
+    CancelledError-with-counter-zero, which would confuse TaskGroup
+    and nested asyncio.timeout scopes.
     """
 
     def __init__(self, *triggers: Trigger) -> None:
@@ -94,11 +96,8 @@ class Fence:
                 self._cancel_reasons.append(reason)
 
         if self._cancel_reasons:
-            reason = self._cancel_reasons[0]
-            if reason.cancel_type is CancelType.TIMEOUT:
-                raise FenceTimeout(self.reasons)
-
-            raise FenceCancelled(self.reasons)
+            self._cancel()
+            return self
 
         self._exit_handlers = [
             source.arm(self._request_cancellation) for source in self._triggers
@@ -112,23 +111,23 @@ class Fence:
         exc_type: type[BaseException] | None,
         exc_val: BaseException | None,
         exc_tb: object,
-    ) -> None:
+    ) -> bool:
         self._exited = True
         if self._armed:
             for guard in self._exit_handlers:
                 guard.disarm()
 
-        # no cancellation occurred
         if self._cancel_token is None:
-            return
+            return False
 
-        self._cancel_token.resolve(exc_type, exc_val, self.reasons)
+        return self._cancel_token.settle(exc_type)
 
     def _request_cancellation(self, reason: CancelReason) -> None:
         self._cancel_reasons.append(reason)
         self._cancel()
 
     def _cancel(self) -> None:
+        # task was already canceled, prevent double cancellation
         if self._cancel_token is not None:
             return
 
@@ -136,7 +135,7 @@ class Fence:
             raise RuntimeError("Fence._cancel() called before __enter__")
 
         self._cancel_token = _CancelToken.schedule(
-            self._current_task, self._cancel_reasons[0], self._cancelling
+            self._current_task, self._cancel_reasons[0].message, self._cancelling
         )
 
 
@@ -151,59 +150,48 @@ class _CancelToken:
     def __init__(
         self,
         task: asyncio.Task[Any],
-        reason: CancelReason,
         cancelling: int,
     ) -> None:
         self._task = task
-        self._reason = reason
         self._cancelling = cancelling
+        self._fired = False
+        self._handle: asyncio.Handle | None = None
 
     @classmethod
     def schedule(
         cls,
         task: asyncio.Task[Any],
-        reason: CancelReason,
+        msg: str,
         cancelling: int,
     ) -> _CancelToken:
-        token = cls(task, reason, cancelling)
-        asyncio.get_running_loop().call_soon(token._fire)
+        token = cls(task, cancelling)
+        token._handle = asyncio.get_running_loop().call_soon(token._fire, msg)
         return token
 
-    def resolve(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        reasons: tuple[CancelReason, ...],
-    ) -> None:
-        # adopted from here
-        # https://github.com/python/cpython/blob/v3.14.3/Lib/asyncio/timeouts.py#L110
+    def settle(self, exc_type: type[BaseException] | None) -> bool:
+        """
+        Balance the cancel counter and decide whether to suppress.
+
+        Returns True to suppress the exception (CancelledError is ours),
+        False to let it propagate.
+        """
+
+        # body completed before cancel was delivered — rescind
+        if not self._fired:
+            if self._handle is not None:
+                self._handle.cancel()
+                self._handle = None
+            return False  # nothing to suppress
+
         remaining = self._task.uncancel()
-        # counter back to baseline — the CancelledError is ours, transform it
-        if remaining <= self._cancelling and exc_type is not None:
-            if issubclass(exc_type, asyncio.CancelledError):
-                if self._reason.cancel_type is CancelType.TIMEOUT:
-                    raise FenceTimeout(reasons) from exc_val
-                raise FenceCancelled(reasons) from exc_val
+        # suppress our CancelledError, propagate everything else
+        return (
+            remaining <= self._cancelling
+            and exc_type is not None
+            and issubclass(exc_type, asyncio.CancelledError)
+        )
 
-            if self._reason.cancel_type is CancelType.TIMEOUT and exc_val is not None:
-                _insert_timeout_error(exc_val, reasons)
-                if isinstance(exc_val, ExceptionGroup):
-                    for exc in exc_val.exceptions:
-                        _insert_timeout_error(exc, reasons)
-
-    def _fire(self) -> None:
-        self._task.cancel(msg=self._reason.message)
-
-
-def _insert_timeout_error(
-    exc_val: BaseException, reasons: tuple[CancelReason, ...]
-) -> None:
-    # adopted from here
-    # https://github.com/python/cpython/blob/v3.14.3/Lib/asyncio/timeouts.py#L133
-    while exc_val.__context__ is not None:
-        if isinstance(exc_val.__context__, asyncio.CancelledError):
-            te = FenceTimeout(reasons)
-            te.__context__ = te.__cause__ = exc_val.__context__
-            exc_val.__context__ = te
-            break
-        exc_val = exc_val.__context__
+    def _fire(self, msg: str) -> None:
+        self._fired = True
+        self._handle = None
+        self._task.cancel(msg=msg)

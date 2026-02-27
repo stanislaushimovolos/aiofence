@@ -5,7 +5,6 @@ from .core import (
     Trigger,
     TriggerHandle,
 )
-from .errors import FenceCancelled, FenceTimeout
 from .triggers import (
     EventHandle,
     EventTrigger,
@@ -19,8 +18,6 @@ __all__ = [
     "EventHandle",
     "EventTrigger",
     "Fence",
-    "FenceCancelled",
-    "FenceTimeout",
     "TimeoutHandle",
     "TimeoutTrigger",
     "Trigger",
