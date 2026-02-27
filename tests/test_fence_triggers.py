@@ -305,3 +305,25 @@ async def test__fence__when_second_trigger_fires_after_fence__then_post_fence_as
     assert fence.cancelled
     assert len(fence.reasons) == 1
     assert asyncio.current_task().cancelling() == 0
+
+
+async def test__fence__when_two_tasks_share_event__then_both_cancelled_and_waiters_cleaned():
+    event = asyncio.Event()
+
+    async def worker() -> Fence:
+        with Fence(EventTrigger(event)) as fence:
+            await asyncio.sleep(10)
+        return fence
+
+    t1 = asyncio.create_task(worker())
+    t2 = asyncio.create_task(worker())
+    await asyncio.sleep(0)
+
+    assert len(event._waiters) == 2
+
+    event.set()
+    fence1, fence2 = await asyncio.gather(t1, t2)
+
+    assert fence1.cancelled
+    assert fence2.cancelled
+    assert len(event._waiters) == 0

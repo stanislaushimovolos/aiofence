@@ -21,14 +21,21 @@ jobs:
     strategy:
       matrix:
         python-version: ["3.12", "3.13", "3.14"]
+        event-loop: [asyncio, uvloop]
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python-version }}
-      - run: uv run pytest --cov=aiofence --cov-report=xml
+      - name: Run tests
+        run: |
+          if [ "${{ matrix.event-loop }}" = "uvloop" ]; then
+            uv run pytest --uvloop --cov=aiofence --cov-report=xml
+          else
+            uv run pytest --cov=aiofence --cov-report=xml
+          fi
       - uses: codecov/codecov-action@v5
-        if: matrix.python-version == '3.13'
+        if: matrix.python-version == '3.13' && matrix.event-loop == 'asyncio'
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml
