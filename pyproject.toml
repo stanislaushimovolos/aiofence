@@ -1,0 +1,63 @@
+[project]
+name = "constellate"
+version = "v0.0.0"
+description = "Python asyncio-native cancellation context library"
+requires-python = ">=3.12"
+license = "MIT"
+classifiers = [
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.15.0",
+    "pre-commit>=4.2.0",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.25",
+    "pytest-cov>=6.0",
+    "ruff>=0.15.2",
+]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "ALL",  # enable everything, then exclude what doesn't fit
+]
+ignore = [
+    "D",       # pydocstyle — we use minimal docstrings per project conventions
+    "ANN",     # flake8-annotations — we already have type hints, these rules are noisy
+    "ERA",     # eradicate — flags commented-out code, too many false positives
+    "T20",     # flake8-print — print() is fine during development
+    "FIX",     # flake8-fixme — TODO/FIXME comments are OK
+    "TD",      # flake8-todos — don't enforce TODO format
+    "CPY",     # flake8-copyright — no copyright headers needed
+    "INP",     # flake8-no-pep420 — false positives on namespace packages
+    "COM812",  # trailing comma — conflicts with ruff formatter
+    "EM101",   # string literal in exception — too pedantic for simple errors
+    "TRY003",  # long exception messages — same as above
+    "SLF001",  # private member access — intentional for asyncio internals
+    "TC",      # flake8-type-checking — not worth the complexity
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "N802", "SIM117", "PT012", "SIM105", "PLR2004", "ARG005"]
+
+[tool.ruff.format]
+quote-style = "double"
