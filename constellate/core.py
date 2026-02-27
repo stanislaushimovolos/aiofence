@@ -15,8 +15,17 @@ class CancelType(Enum):
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class CancelReason:
+    """
+    Immutable record describing why cancellation occurred.
+    """
+
+    # Human-readable description, e.g. "timed out after 5s"
     message: str
+    # Category of cancellation (TIMEOUT or EVENT).
     cancel_type: CancelType
+    # Optional machine-readable identifier for programmatic matching.
+    # Set via trigger's `code` param. Works with StrEnum for type safety.
+    code: str | None = None
 
 
 CancelCallback = Callable[[CancelReason], None]
@@ -80,6 +89,9 @@ class Fence:
     @property
     def reasons(self) -> tuple[CancelReason, ...]:
         return tuple(self._cancel_reasons)
+
+    def cancelled_by(self, code: str) -> bool:
+        return any(r.code == code for r in self._cancel_reasons)
 
     def __enter__(self) -> Self:
         if self._exited or self._current_task is not None:

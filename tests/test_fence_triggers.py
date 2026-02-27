@@ -164,6 +164,67 @@ async def test__fence__when_event_set_inside_body__then_no_spurious_cancel_after
     assert asyncio.current_task().cancelling() == 0
 
 
+async def test__fence__when_event_has_code__then_reason_carries_code():
+    event = asyncio.Event()
+    asyncio.get_running_loop().call_soon(event.set)
+
+    with Fence(EventTrigger(event, code="shutdown")) as fence:
+        await asyncio.sleep(1)
+
+    assert fence.cancelled
+    assert fence.reasons[0].code == "shutdown"
+
+
+async def test__fence__when_timeout_has_code__then_reason_carries_code():
+    with Fence(TimeoutTrigger(0, code="request_budget")) as fence:
+        await asyncio.sleep(1)
+
+    assert fence.cancelled
+    assert fence.reasons[0].code == "request_budget"
+
+
+async def test__fence__when_no_code__then_reason_code_is_none():
+    with Fence(TimeoutTrigger(0)) as fence:
+        await asyncio.sleep(1)
+
+    assert fence.cancelled
+    assert fence.reasons[0].code is None
+
+
+async def test__fence__cancelled_by__when_code_matches__then_true():
+    event = asyncio.Event()
+    asyncio.get_running_loop().call_soon(event.set)
+
+    with Fence(EventTrigger(event, code="disconnect")) as fence:
+        await asyncio.sleep(1)
+
+    assert fence.cancelled_by("disconnect")
+    assert not fence.cancelled_by("shutdown")
+
+
+async def test__fence__cancelled_by__when_multiple_triggers__then_matches_any():
+    event1 = asyncio.Event()
+    event2 = asyncio.Event()
+
+    with Fence(
+        EventTrigger(event1, code="shutdown"), EventTrigger(event2, code="disconnect")
+    ) as fence:
+        event1.set()
+        event2.set()
+        await asyncio.sleep(1)
+
+    assert fence.cancelled_by("shutdown")
+    assert fence.cancelled_by("disconnect")
+    assert not fence.cancelled_by("timeout")
+
+
+async def test__fence__cancelled_by__when_not_cancelled__then_false():
+    with Fence() as fence:
+        await asyncio.sleep(0)
+
+    assert not fence.cancelled_by("anything")
+
+
 async def test__fence__when_multiple_triggers_fire__then_all_reasons_recorded():
     event1 = asyncio.Event()
     event2 = asyncio.Event()

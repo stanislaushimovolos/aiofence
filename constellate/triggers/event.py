@@ -14,13 +14,15 @@ from constellate.core import (
 
 
 class EventTrigger(Trigger):
-    def __init__(self, event: Event) -> None:
+    def __init__(self, event: Event, *, code: str | None = None) -> None:
         self._event = event
+        self._code = code
 
     def _reason(self) -> CancelReason:
         return CancelReason(
             message=f"event {self._event!r} triggered",
             cancel_type=CancelType.EVENT,
+            code=self._code,
         )
 
     def check(self) -> CancelReason | None:
