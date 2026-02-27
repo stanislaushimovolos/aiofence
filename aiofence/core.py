@@ -162,9 +162,6 @@ class Fence:
         Defers task.cancel() via call_soon. Used from __enter__ (pre-trigger
         path) to avoid setting _must_cancel during synchronous execution.
         """
-        if self._cancel_token is not None:
-            return
-
         task, cancelling = self._cancel_preconditions()
         self._cancel_token = _CancelToken.schedule_cancel(
             task, self._cancel_reasons[0].message, cancelling
