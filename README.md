@@ -1,12 +1,12 @@
 <p align="center">
-  <img src="docs/images/logo.png" alt="Constellate" />
+  <img src="docs/images/logo.png" alt="aiofence" />
 </p>
 
-# constellate
+# aiofence
 
-[![codecov](https://codecov.io/gh/stanislaushimovolos/constellate/branch/main/graph/badge.svg)](https://codecov.io/gh/stanislaushimovolos/constellate)
+[![codecov](https://codecov.io/gh/stanislaushimovolos/aiofence/branch/main/graph/badge.svg)](https://codecov.io/gh/stanislaushimovolos/aiofence)
 
-Multi-reason cancellation contexts for Python asyncio. Inspired by Go's `context.Context`, `constellate` provides a cancellation context that propagates hierarchically through your application via `ContextVar` — no need to thread events, flags, or tokens through every call signature. Declare cancellation sources once at the boundary — inner code just wraps cancellable work in a context manager and doesn't care about the actual reasons, though it can inspect them if needed.
+Multi-reason cancellation contexts for Python asyncio. Inspired by Go's `context.Context`, aiofence provides a cancellation context that propagates hierarchically through your application via `ContextVar` — no need to thread events, flags, or tokens through every call signature. Declare cancellation sources once at the boundary — inner code just wraps cancellable work in a context manager and doesn't care about the actual reasons, though it can inspect them if needed.
 
 ## Motivation
 
@@ -29,7 +29,7 @@ async def handle_request(request, shutdown_event, timeout=30):
 ```
 For a deeper dive into the problem and design rationale, see [this Medium post](https://medium.com/p/8cdf8c5d519e).
 
-`Constellate` solves this. Declare all cancellation sources once, composably. The callee doesn't even know cancellation exists:
+`aiofence` solves this. Declare all cancellation sources once, composably. The callee doesn't even know cancellation exists:
 
 ```python
 with Fence(TimeoutTrigger(30), EventTrigger(shutdown, code="shutdown")) as fence:
@@ -46,7 +46,7 @@ else:
 
 `shield()` prevents cancellation from reaching shielded code, but it works from the opposite direction — you protect everything that *must not* be cancelled. In practice this means wrapping database writes, state transitions, logging, and cleanup individually, and each function needs to know whether it's cancel-safe.
 
-`Constellate` comes at it differently: most code doesn't know cancellation exists. You only wrap the expensive, safely-interruptible parts — the operations you *want* to cancel. For example, in an LLM inference service, you don't want to cancel database queries or response formatting. You want to cancel the LLM call that's burning GPU time for a client that already disconnected:
+aiofence comes at it differently: most code doesn't know cancellation exists. You only wrap the expensive, safely-interruptible parts — the operations you *want* to cancel. For example, in an LLM inference service, you don't want to cancel database queries or response formatting. You want to cancel the LLM call that's burning GPU time for a client that already disconnected:
 
 ```python
 with Fence(EventTrigger(client_disconnect), TimeoutTrigger(budget)) as fence:
@@ -57,11 +57,11 @@ await db.save(result or fallback)  # always runs, no shield needed
 
 ### Why not anyio?
 
-anyio is one of the best async libraries in the Python ecosystem, and its `CancelScope` is a more powerful and general cancellation model than what asyncio provides natively. Constellate is narrower in scope and makes different trade-offs:
+anyio is one of the best async libraries in the Python ecosystem, and its `CancelScope` is a more powerful and general cancellation model than what asyncio provides natively. aiofence is narrower in scope and makes different trade-offs:
 
-1. **Drop-in for existing asyncio code.** anyio introduces its own cancellation semantics (`CancelScope`, level-triggered cancellation, nested scope trees). If your app is already built on pure asyncio, adopting anyio's model is a significant migration. Constellate works directly with asyncio's `cancel()`/`uncancel()` counter protocol — no new runtime, no new cancellation model.
+1. **Drop-in for existing asyncio code.** anyio introduces its own cancellation semantics (`CancelScope`, level-triggered cancellation, nested scope trees). If your app is already built on pure asyncio, adopting anyio's model is a significant migration. aiofence works directly with asyncio's `cancel()`/`uncancel()` counter protocol — no new runtime, no new cancellation model.
 
-2. **Different design philosophy.** anyio's approach is a broad `CancelScope` over the whole operation, with `CancelScope(shield=True)` around the parts that must survive. Constellate takes the inverse: most code runs unaware of cancellation, and you wrap only the expensive, safely-interruptible parts with a `Fence`.
+2. **Different design philosophy.** anyio's approach is a broad `CancelScope` over the whole operation, with `CancelScope(shield=True)` around the parts that must survive. aiofence takes the inverse: most code runs unaware of cancellation, and you wrap only the expensive, safely-interruptible parts with a `Fence`.
 
 ## How It Works
 

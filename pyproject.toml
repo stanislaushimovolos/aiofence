@@ -1,9 +1,13 @@
 [project]
-name = "constellate"
-version = "v0.0.0"
+name = "aiofence"
+dynamic = ["version"]
 description = "Python asyncio-native cancellation context library"
-requires-python = ">=3.12"
+readme = "README.md"
+requires-python = ">=3.12,<3.15"
 license = "MIT"
+authors = [
+    { name = "Shimovolos Stanislav" },
+]
 classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -11,9 +15,15 @@ classifiers = [
 ]
 dependencies = []
 
+[project.urls]
+Repository = "https://github.com/stanislaushimovolos/aiofence"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "aiofence/__version__.py"
 
 [dependency-groups]
 dev = [
@@ -58,6 +68,12 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "N802", "SIM117", "PT012", "SIM105", "PLR2004", "ARG005"]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/aiofence", "/README.md", "/LICENSE"]
 
 [tool.ruff.format]
 quote-style = "double"
