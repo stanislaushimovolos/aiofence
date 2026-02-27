@@ -6,38 +6,28 @@ Read and follow strictly: @CONTRIBUTING.md
 
 ## Project Context
 
-Constellate is a Python asyncio-native cancellation context library, inspired by Go's `context.Context` with implicit propagation via `ContextVar`.
+Multi-reason cancellation contexts for Python asyncio. Declare all cancellation sources once at the boundary — inner code wraps cancellable work in a `Fence` context manager. No need to thread events, flags, or tokens through every call signature.
 
-Unifies all cancellation reasons (timeout, client disconnect, manual cancel, parent cancelled) behind one interface. User code doesn't care *why* it was cancelled.
-
-## Documentation
-
-- @docs/architecture.md — architecture, core concepts, cancellation flow, design decisions
+For architecture, core concepts, cancellation flow, and design decisions see @docs/architecture.md
 
 ## Tech Stack
 
-- **Python 3.12+** — asyncio-native, no threads
-- **ContextVar** — implicit propagation (no `ctx` first-arg like Go)
-- **anyio** — dependency for event loop compatibility
+- **Python 3.12+** — asyncio-native, no dependencies, no threads
 - **uv** — package management
 - **hatchling** — build backend
 
-## API Usage
+## API Overview
 
 ```python
-# build context (immutable, composable)
-ctx = Context().with_timeout(5).with_cancel_on(disconnect_event)
-
-# execute in scope
-with Scope(ctx) as scope:
+with Fence(TimeoutTrigger(30), EventTrigger(shutdown, code="shutdown")) as fence:
     await do_work()
 
-if scope.cancelled:
-    print(scope.reasons)  # [TimeoutExpired(5)]
-
-# or construct directly
-ctx = Context(TimeoutSource(30), EventCancelSource(shutdown_event))
+if fence.cancelled:
+    print(fence.reasons)              # (CancelReason(message='timed out after 30s', ...),)
+    print(fence.cancelled_by("shutdown"))  # True / False
 ```
+
+Core types: `Fence`, `Trigger`, `TriggerHandle`, `CancelReason`, `CancelType`. Built-in triggers: `TimeoutTrigger`, `EventTrigger`.
 
 ## Workflow
 
