@@ -33,9 +33,7 @@ class EventTrigger(Trigger):
         fut = loop.create_future()
         reason = self._reason()
         handle = EventHandle(self._event, fut)
-        fut.add_done_callback(
-            lambda _: on_cancel(reason) if not handle.disarmed else None
-        )
+        fut.add_done_callback(lambda _: on_cancel(reason) if not handle.disarmed else None)
         self._event._waiters.append(fut)
         return handle
 

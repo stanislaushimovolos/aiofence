@@ -99,9 +99,7 @@ class Fence:
             self._cancel()
             return self
 
-        self._exit_handlers = [
-            source.arm(self._request_cancellation) for source in self._triggers
-        ]
+        self._exit_handlers = [source.arm(self._request_cancellation) for source in self._triggers]
         self._armed = True
         return self
 
