@@ -6,7 +6,7 @@
 
 [![codecov](https://codecov.io/gh/stanislaushimovolos/constellate/branch/main/graph/badge.svg)](https://codecov.io/gh/stanislaushimovolos/constellate)
 
-Multi-reason cancellation contexts for Python asyncio. Inspired by Go's `context.Context`, constellate provides a cancellation context that propagates hierarchically through your application via `ContextVar` — no need to thread events, flags, or tokens through every call signature. Declare cancellation sources once at the boundary — inner code just wraps cancellable work in a context manager and doesn't care about the actual reasons, though it can inspect them if needed.
+Multi-reason cancellation contexts for Python asyncio. Inspired by Go's `context.Context`, `constellate` provides a cancellation context that propagates hierarchically through your application via `ContextVar` — no need to thread events, flags, or tokens through every call signature. Declare cancellation sources once at the boundary — inner code just wraps cancellable work in a context manager and doesn't care about the actual reasons, though it can inspect them if needed.
 
 ## Motivation
 
@@ -46,7 +46,7 @@ else:
 
 `shield()` prevents cancellation from reaching shielded code, but it works from the opposite direction — you protect everything that *must not* be cancelled. In practice this means wrapping database writes, state transitions, logging, and cleanup individually, and each function needs to know whether it's cancel-safe.
 
-Constellate comes at it differently: most code doesn't know cancellation exists. You only wrap the expensive, safely-interruptible parts — the operations you *want* to cancel. For example, in an LLM inference service, you don't want to cancel database queries or response formatting. You want to cancel the LLM call that's burning GPU time for a client that already disconnected:
+`Constellate` comes at it differently: most code doesn't know cancellation exists. You only wrap the expensive, safely-interruptible parts — the operations you *want* to cancel. For example, in an LLM inference service, you don't want to cancel database queries or response formatting. You want to cancel the LLM call that's burning GPU time for a client that already disconnected:
 
 ```python
 with Fence(EventTrigger(client_disconnect), TimeoutTrigger(budget)) as fence:

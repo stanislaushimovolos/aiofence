@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 from asyncio import Event
 from contextlib import suppress
