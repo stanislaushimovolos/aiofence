@@ -12,7 +12,7 @@
 - **`TriggerHandle`** — live watch returned by `Trigger.arm()`. `disarm()` stops monitoring.
 - **`Fence`** — sync context manager that arms triggers against the current task. Suppresses `CancelledError` on exit. Caller inspects `fence.cancelled` / `fence.reasons` after the block.
 - **`_CancelToken`** — internal. Encapsulates one `cancel()`/`uncancel()` cycle. Tracks whether the deferred cancel fired and settles ownership in `__exit__`.
-- **`CancelReason`** — frozen dataclass with `message` and `cancel_type` (TIMEOUT or CANCELLED).
+- **`CancelReason`** — frozen dataclass with `message` and `cancel_type` (TIMEOUT or EVENT).
 
 ## Cancellation Flow
 
@@ -20,7 +20,7 @@
 2. Runs `check()` on all triggers — if any pre-triggered, records reasons and schedules `task.cancel()` via `call_soon`
 3. If no pre-triggers, arms all triggers; when one fires, callback records the reason and schedules `task.cancel()` via `call_soon`
 4. Body runs. At the next `await`, `CancelledError` is raised inside the body
-5. `Fence.__exit__` disarms all triggers, then calls `_CancelToken.settle()`:
+5. `Fence.__exit__` disarms all triggers, then calls `_CancelToken.resolve()`:
    - If cancel never fired (sync body completed first) — rescinds pending `call_soon`, returns `False`
    - If cancel fired and counter returned to baseline — `uncancel()` + suppress (`return True`)
    - If counter above baseline — outer scope also cancelled, don't suppress (`return False`)
