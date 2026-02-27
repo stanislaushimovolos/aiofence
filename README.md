@@ -1,6 +1,6 @@
 # constellate
 
-[![codecov](https://codecov.io/gh/stanislaushimovolos/constellate/branch/feat/graph/badge.svg)](https://codecov.io/gh/stanislaushimovolos/constellate)
+[![codecov](https://codecov.io/gh/stanislaushimovolos/constellate/branch/main/graph/badge.svg)](https://codecov.io/gh/stanislaushimovolos/constellate)
 
 Asyncio-native cancellation contexts for Python. Inspired by Go's `context.Context` with implicit propagation via `ContextVar`.
 
