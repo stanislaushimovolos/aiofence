@@ -35,8 +35,8 @@ Examples:
 
 ## Guidelines
 
-- Focus on the "why" rather than the "what"
-- Keep description concise (1-2 sentences)
+- Single sentence only — no body, no multi-line messages
+- Keep it short and direct
 - If no changes exist, tell the user there's nothing to commit
 - Do NOT push after committing
 - Do NOT add Co-Authored-By or other AI markers

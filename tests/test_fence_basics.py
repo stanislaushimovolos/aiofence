@@ -57,3 +57,9 @@ async def test__fence__when_body_raises__then_exception_propagates():
     with pytest.raises(RuntimeError, match="cannot be reused"):
         with fence:
             pass
+
+
+async def test__fence__cancel_before_enter__then_raises():
+    fence = Fence()
+    with pytest.raises(RuntimeError, match="before __enter__"):
+        fence._cancel()
