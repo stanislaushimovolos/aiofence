@@ -33,6 +33,7 @@ dev = [
     "pytest-asyncio>=0.25",
     "pytest-cov>=6.0",
     "ruff>=0.15.2",
+    "uvloop>=0.21",
 ]
 
 [tool.mypy]
@@ -67,7 +68,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "N802", "SIM117", "PT012", "SIM105", "PLR2004", "ARG005"]
+"tests/**" = ["S101", "N802", "SIM117", "PT012", "SIM105", "PLR2004", "ARG005", "PLC0415"]
 
 [tool.uv]
 default-groups = ["dev"]
