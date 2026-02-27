@@ -65,4 +65,4 @@ Run formatting before every commit.
 
 - Brief plan before starting
 - TDD when defining new behavior: interface -> tests -> implementation
-- If docs and code are inconsistent — highlight and ask, or fix immediately
+- **If docs and code are inconsistent — highlight and ask, or fix immediately**

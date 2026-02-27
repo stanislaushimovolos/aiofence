@@ -103,7 +103,6 @@ class Fence:
             source.arm(self._request_cancellation) for source in self._triggers
         ]
         self._armed = True
-
         return self
 
     def __exit__(
@@ -120,7 +119,7 @@ class Fence:
         if self._cancel_token is None:
             return False
 
-        return self._cancel_token.settle(exc_type)
+        return self._cancel_token.resolve(exc_type)
 
     def _request_cancellation(self, reason: CancelReason) -> None:
         self._cancel_reasons.append(reason)
@@ -168,7 +167,7 @@ class _CancelToken:
         token._handle = asyncio.get_running_loop().call_soon(token._fire, msg)
         return token
 
-    def settle(self, exc_type: type[BaseException] | None) -> bool:
+    def resolve(self, exc_type: type[BaseException] | None) -> bool:
         """
         Balance the cancel counter and decide whether to suppress.
 

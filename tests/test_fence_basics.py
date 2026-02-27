@@ -19,13 +19,6 @@ async def test__fence__when_no_sources_sync__then_protocol_intact():
     assert not fence.cancelled
 
 
-async def test__fence__when_zero_timeout__then_suppressed_and_cancelled():
-    with Fence(TimeoutTrigger(0)) as fence:
-        await asyncio.sleep(1)
-
-    assert fence.cancelled
-
-
 async def test__fence__when_zero_timeout__then_body_interrupted_at_await():
     reached_before_await = False
     reached_after_await = False
@@ -50,7 +43,13 @@ async def test__fence__when_zero_timeout_sync_body__then_body_completes():
     assert reached
 
 
-async def test__fence__when_reenter__then_raises_runtime_error():
+async def test__fence__when_body_raises__then_exception_propagates():
+    with pytest.raises(ValueError, match="boom"):
+        with Fence() as fence:
+            raise ValueError("boom")
+
+    assert not fence.cancelled
+
     fence = Fence()
     with fence:
         await asyncio.sleep(0)

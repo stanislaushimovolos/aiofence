@@ -2,7 +2,7 @@
 
 > Entry point for Claude Code when working with this repository.
 
-Read and follow strictly: @DEVELOPMENT_PRINCIPLES.md
+Read and follow strictly: @CONTRIBUTING.md
 
 ## Project Context
 
