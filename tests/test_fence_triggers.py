@@ -3,7 +3,7 @@ import asyncio
 import pytest
 
 from constellate import EventTrigger, Fence, TimeoutTrigger
-from constellate.core import CancelType
+from constellate.core import CancelCallback, CancelReason, CancelType, Trigger, TriggerHandle
 
 # --- Pre-triggered ---
 
@@ -25,7 +25,7 @@ async def test__fence__when_event_pre_set__then_suppressed_and_cancelled():
         await asyncio.sleep(1)
 
     assert fence.cancelled
-    assert fence.reasons[0].cancel_type is CancelType.CANCELLED
+    assert fence.reasons[0].cancel_type is CancelType.EVENT
 
 
 async def test__fence__when_event_pre_set__then_body_interrupted_at_await():
@@ -139,6 +139,19 @@ async def test__fence__when_disarm_after_trigger_fired__then_no_crash():
     handle.disarm()  # should not crash
 
 
+async def test__fence__when_event_set_inside_body__then_body_interrupted_at_await():
+    event = asyncio.Event()
+    reached = False
+
+    with Fence(EventTrigger(event)) as fence:
+        event.set()
+        await asyncio.sleep(0)
+        reached = True
+
+    assert fence.cancelled
+    assert not reached
+
+
 async def test__fence__when_event_set_inside_body__then_no_spurious_cancel_after_exit():
     event = asyncio.Event()
 
@@ -162,3 +175,72 @@ async def test__fence__when_multiple_triggers_fire__then_all_reasons_recorded():
 
     assert fence.cancelled
     assert len(fence.reasons) == 2
+
+
+async def test__fence__when_trigger_fires_inline__then_raises_invalid_state():
+    class InlineTrigger(Trigger):
+        def check(self) -> CancelReason | None:
+            return None
+
+        def arm(self, on_cancel: CancelCallback) -> TriggerHandle:
+            on_cancel(CancelReason(message="inline", cancel_type=CancelType.EVENT))
+            return _NoopHandle()
+
+    class _NoopHandle(TriggerHandle):
+        def disarm(self) -> None:
+            pass
+
+    with pytest.raises(asyncio.InvalidStateError, match="synchronously inside the task"):
+        with Fence(InlineTrigger()):
+            await asyncio.sleep(0)
+
+
+async def test__fence__when_second_trigger_fires_during_cleanup__then_both_reasons_recorded():
+    event1 = asyncio.Event()
+    event2 = asyncio.Event()
+    cleanup_done = False
+
+    async def set_event2_later():
+        await asyncio.sleep(0.01)
+        event2.set()
+
+    bg_task = asyncio.create_task(set_event2_later())  # noqa: RUF006, F841
+
+    with Fence(EventTrigger(event1), EventTrigger(event2)) as fence:
+        event1.set()
+        try:
+            await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.05)
+            cleanup_done = True
+
+    assert fence.cancelled
+    assert cleanup_done
+    assert len(fence.reasons) == 2
+    assert asyncio.current_task().cancelling() == 0
+
+
+async def test__fence__when_second_trigger_fires_after_fence__then_post_fence_async_works():
+    event1 = asyncio.Event()
+    event2 = asyncio.Event()
+
+    async def set_event2_later():
+        await asyncio.sleep(0.05)
+        event2.set()
+
+    bg_task = asyncio.create_task(set_event2_later())  # noqa: RUF006, F841
+
+    with Fence(EventTrigger(event1), EventTrigger(event2)) as fence:
+        event1.set()
+        try:
+            await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.01)
+
+    # event2 fires here, after fence exited and disarmed triggers
+    await asyncio.sleep(0.1)
+    assert event1.is_set()
+    assert event2.is_set()
+    assert fence.cancelled
+    assert len(fence.reasons) == 1
+    assert asyncio.current_task().cancelling() == 0

@@ -20,7 +20,7 @@ class EventTrigger(Trigger):
     def _reason(self) -> CancelReason:
         return CancelReason(
             message=f"event {self._event!r} triggered",
-            cancel_type=CancelType.CANCELLED,
+            cancel_type=CancelType.EVENT,
         )
 
     def check(self) -> CancelReason | None:

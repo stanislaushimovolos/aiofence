@@ -9,7 +9,7 @@ from typing import Any, Self
 
 
 class CancelType(Enum):
-    CANCELLED = auto()
+    EVENT = auto()
     TIMEOUT = auto()
 
 
@@ -96,10 +96,14 @@ class Fence:
                 self._cancel_reasons.append(reason)
 
         if self._cancel_reasons:
-            self._cancel()
+            # 3.12: uncancel() doesn't clear _must_cancel, so calling
+            # task.cancel() synchronously here would cause a spurious
+            # CancelledError at the next await. Defer via call_soon so
+            # cancel() finds _fut_waiter set and never touches _must_cancel.
+            self._schedule_cancel()
             return self
 
-        self._exit_handlers = [source.arm(self._request_cancellation) for source in self._triggers]
+        self._exit_handlers = [source.arm(self._on_trigger) for source in self._triggers]
         self._armed = True
         return self
 
@@ -119,21 +123,46 @@ class Fence:
 
         return self._cancel_token.resolve(exc_type)
 
-    def _request_cancellation(self, reason: CancelReason) -> None:
+    def _on_trigger(self, reason: CancelReason) -> None:
         self._cancel_reasons.append(reason)
         self._cancel()
 
     def _cancel(self) -> None:
-        # task was already canceled, prevent double cancellation
+        """
+        Cancels task immediately. Must only be called from event loop
+        callbacks (outside the task), where _fut_waiter is set and
+        task.cancel() won't touch _must_cancel.
+        """
         if self._cancel_token is not None:
             return
 
+        if asyncio.current_task() is self._current_task:
+            raise asyncio.InvalidStateError(
+                "Trigger callback fired synchronously inside the task. "
+                "Trigger.arm() callbacks must fire from the event loop, not inline."
+            )
+
+        task, cancelling = self._cancel_preconditions()
+        self._cancel_token = _CancelToken.cancel(task, self._cancel_reasons[0].message, cancelling)
+
+    def _schedule_cancel(self) -> None:
+        """
+        Defers task.cancel() via call_soon. Used from __enter__ (pre-trigger
+        path) to avoid setting _must_cancel during synchronous execution.
+        """
+        if self._cancel_token is not None:
+            return
+
+        task, cancelling = self._cancel_preconditions()
+        self._cancel_token = _CancelToken.schedule_cancel(
+            task, self._cancel_reasons[0].message, cancelling
+        )
+
+    def _cancel_preconditions(self) -> tuple[asyncio.Task[Any], int]:
         if self._current_task is None or self._cancelling is None:
             raise RuntimeError("Fence._cancel() called before __enter__")
 
-        self._cancel_token = _CancelToken.schedule(
-            self._current_task, self._cancel_reasons[0].message, self._cancelling
-        )
+        return self._current_task, self._cancelling
 
 
 class _CancelToken:
@@ -151,18 +180,29 @@ class _CancelToken:
     ) -> None:
         self._task = task
         self._cancelling = cancelling
-        self._fired = False
+        self._delivered = False
         self._handle: asyncio.Handle | None = None
 
     @classmethod
-    def schedule(
+    def schedule_cancel(
         cls,
         task: asyncio.Task[Any],
         msg: str,
         cancelling: int,
     ) -> _CancelToken:
         token = cls(task, cancelling)
-        token._handle = asyncio.get_running_loop().call_soon(token._fire, msg)
+        token._handle = asyncio.get_running_loop().call_soon(token._deliver_cancellation, msg)
+        return token
+
+    @classmethod
+    def cancel(
+        cls,
+        task: asyncio.Task[Any],
+        msg: str,
+        cancelling: int,
+    ) -> _CancelToken:
+        token = cls(task, cancelling)
+        token._deliver_cancellation(msg)
         return token
 
     def resolve(self, exc_type: type[BaseException] | None) -> bool:
@@ -174,7 +214,7 @@ class _CancelToken:
         """
 
         # body completed before cancel was delivered — rescind
-        if not self._fired:
+        if not self._delivered:
             if self._handle is not None:
                 self._handle.cancel()
                 self._handle = None
@@ -188,7 +228,7 @@ class _CancelToken:
             and issubclass(exc_type, asyncio.CancelledError)
         )
 
-    def _fire(self, msg: str) -> None:
-        self._fired = True
+    def _deliver_cancellation(self, msg: str) -> None:
+        self._delivered = True
         self._handle = None
         self._task.cancel(msg=msg)
