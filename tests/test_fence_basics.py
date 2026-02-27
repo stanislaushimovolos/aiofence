@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from constellate import Fence, TimeoutTrigger
+from aiofence import Fence, TimeoutTrigger
 
 
 async def test__fence__when_no_sources_async__then_protocol_intact():

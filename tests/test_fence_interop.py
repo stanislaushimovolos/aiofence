@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from constellate import EventTrigger, Fence, TimeoutTrigger
+from aiofence import EventTrigger, Fence, TimeoutTrigger
 
 # --- Nested fences ---
 

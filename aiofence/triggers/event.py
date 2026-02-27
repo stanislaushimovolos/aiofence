@@ -4,7 +4,7 @@ import asyncio
 from asyncio import Event
 from contextlib import suppress
 
-from constellate.core import (
+from aiofence.core import (
     CancelCallback,
     CancelReason,
     CancelType,

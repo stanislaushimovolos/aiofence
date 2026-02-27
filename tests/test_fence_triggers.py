@@ -2,8 +2,8 @@ import asyncio
 
 import pytest
 
-from constellate import EventTrigger, Fence, TimeoutTrigger
-from constellate.core import CancelCallback, CancelReason, CancelType, Trigger, TriggerHandle
+from aiofence import EventTrigger, Fence, TimeoutTrigger
+from aiofence.core import CancelCallback, CancelReason, CancelType, Trigger, TriggerHandle
 
 # --- Pre-triggered ---
 

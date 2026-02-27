@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
-from constellate.core import (
+from aiofence.core import (
     CancelCallback,
     CancelReason,
     CancelType,

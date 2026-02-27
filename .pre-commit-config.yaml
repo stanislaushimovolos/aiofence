@@ -32,7 +32,7 @@ repos:
 
       - id: mypy
         name: mypy
-        entry: uv run mypy constellate
+        entry: uv run mypy aiofence
         require_serial: true
         language: system
         pass_filenames: false
