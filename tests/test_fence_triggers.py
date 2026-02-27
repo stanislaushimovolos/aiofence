@@ -321,3 +321,96 @@ async def test__fence__when_multiple_triggers_fire__then_all_reasons_recorded():
 
     assert fence.cancelled
     assert len(fence.reasons) == 2
+
+
+async def test__fence__when_nested_fences_share_same_event__then_both_cancelled():
+    event = asyncio.Event()
+    outer = Fence(EventTrigger(event))
+    inner = Fence(EventTrigger(event))
+    reached_after_await = False
+    reached_after_inner = False
+
+    with outer:
+        with inner:
+            event.set()
+            await asyncio.sleep(1)
+            reached_after_await = True
+        reached_after_inner = True
+
+    assert inner.cancelled
+    assert outer.cancelled
+    assert not reached_after_await
+    assert not reached_after_inner
+
+
+async def test__fence__when_external_cancel_with_nested_fences__then_propagates():
+    event1 = asyncio.Event()  # never fires
+    event2 = asyncio.Event()  # never fires
+    outer_cancelled = None
+    inner_cancelled = None
+    reached_after_inner = False
+
+    async def task_body():
+        nonlocal reached_after_inner, outer_cancelled, inner_cancelled
+        outer = Fence(EventTrigger(event1))
+        inner = Fence(EventTrigger(event2))
+        try:
+            with outer:
+                with inner:
+                    await asyncio.sleep(10)
+                reached_after_inner = True
+        finally:
+            outer_cancelled = outer.cancelled
+            inner_cancelled = inner.cancelled
+
+    task = asyncio.get_running_loop().create_task(task_body())
+    await asyncio.sleep(0)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert not reached_after_inner
+    assert not inner_cancelled
+    assert not outer_cancelled
+    assert task.cancelled()
+    assert task.cancelling() == 1
+
+
+async def test__fence__when_user_uncancels_inside_body__then_counter_balanced():
+    task = asyncio.current_task()
+
+    with Fence(TimeoutTrigger(0.001)) as fence:
+        try:
+            await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            task.uncancel()
+
+    assert fence.cancelled
+    assert task.cancelling() == 0
+
+
+async def test__fence__when_asyncio_timeout_zero_nested_inside__then_timeout_raises():
+    event = asyncio.Event()  # never fires
+
+    with pytest.raises(TimeoutError):
+        with Fence(EventTrigger(event)) as fence:
+            async with asyncio.timeout(0):
+                await asyncio.sleep(10)
+
+    assert not fence.cancelled
+
+
+async def test__fence__when_child_task_cancelled_inside_body__then_fence_unaffected():
+    event = asyncio.Event()  # never fires
+    task = asyncio.current_task()
+
+    with pytest.raises(asyncio.CancelledError):
+        with Fence(EventTrigger(event)) as fence:
+            child = asyncio.create_task(asyncio.sleep(10))
+            await asyncio.sleep(0)
+            child.cancel()
+            await child
+
+    assert not fence.cancelled
+    assert task.cancelling() == 0
