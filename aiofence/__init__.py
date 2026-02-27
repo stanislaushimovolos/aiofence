@@ -1,3 +1,4 @@
+from .__version__ import __version__
 from .core import (
     CancelReason,
     CancelType,
@@ -22,4 +23,5 @@ __all__ = [
     "TimeoutTrigger",
     "Trigger",
     "TriggerHandle",
+    "__version__",
 ]
