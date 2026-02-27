@@ -73,7 +73,7 @@ ignore = [
 default-groups = ["dev"]
 
 [tool.hatch.build.targets.sdist]
-include = ["/aiofence", "/tests", "/README.md", "/LICENSE"]
+include = ["/aiofence", "/README.md", "/LICENSE"]
 
 [tool.ruff.format]
 quote-style = "double"
