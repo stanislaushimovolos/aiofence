@@ -105,6 +105,20 @@ async def test__fence__when_trigger_fires_and_body_raises__then_exception_propag
     assert task.cancelling() == 0
 
 
+async def test__fence__when_trigger_fires_and_finally_raises__then_exception_propagates():
+    task = asyncio.current_task()
+
+    with pytest.raises(ValueError, match="boom"):
+        with Fence(TimeoutTrigger(0.001)) as fence:
+            try:
+                await asyncio.sleep(1)
+            finally:
+                raise ValueError("boom")
+
+    assert fence.cancelled
+    assert task.cancelling() == 0
+
+
 async def test__fence__when_user_uncancels_inside_body__then_counter_balanced():
     task = asyncio.current_task()
 

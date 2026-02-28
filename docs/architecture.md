@@ -35,15 +35,32 @@ Fence **always suppresses** `CancelledError`. No exceptions propagate from `__ex
 
 ### Why suppress instead of raising
 
-Three alternatives were considered and rejected:
+Three alternatives were considered and rejected. All lose worker control (code after the `with` block never runs), and each has a unique breakage:
 
-1. **Raise a CancelledError subclass** (e.g. `FenceCancelled(CancelledError)`) — `task.cancelled()` returns `True` because the exception is a `CancelledError`, but the counter is 0. `TaskGroup` silently swallows it. `except CancelledError` catches it unexpectedly.
+1. **Raise a CancelledError subclass** — breaks TaskGroup. `TaskGroup.__aexit__` uses `et is CancelledError` (identity check, not `isinstance`), so a subclass is treated as a regular exception. This is by design — [subclassing CancelledError is not officially supported](https://discuss.python.org/t/subclassing-cancellederror/92285):
 
-2. **`uncancel()` + propagate CancelledError** — produces `CancelledError` with counter at 0. Same inconsistent state as option 1. `asyncio.timeout` avoids this by converting to `TimeoutError` instead — but we don't want to force callers to catch a specific exception.
+   ```python
+   async with asyncio.TaskGroup() as tg:
+       tg.create_task(important_work())
+       with Fence(TimeoutTrigger(1)) as fence:
+           await asyncio.sleep(10)
+       # FenceCancelled propagates → BaseExceptionGroup([FenceCancelled])
+   ```
 
-3. **Don't `uncancel()` + propagate** — counter stays inflated. Outer scopes (e.g. `asyncio.timeout`) can't determine ownership because Fence's unclaimed cancel inflated their view of the counter. Breaks nesting.
+2. **`uncancel()` + propagate CancelledError** — no protocol breakage, but a handled internal timeout leaks as `CancelledError` to the caller. The user can't distinguish Fence's cancel from external cancellation without manually tracking the counter.
 
-Suppression is the only approach that's both correct and composable with `TaskGroup`, `asyncio.timeout`, and nested Fences.
+3. **Don't `uncancel()` + propagate** — breaks `asyncio.timeout`. The inflated counter makes outer scopes think an additional cancel is in flight:
+
+   ```python
+   async with asyncio.timeout(5):    # baseline=0
+       with Fence(TimeoutTrigger(1)) as fence:
+           await asyncio.sleep(10)
+       # Fence: cancel() → counter=1, no uncancel
+       # timeout fires → cancel() → counter=2, uncancel() → 1
+       # remaining(1) > baseline(0) → "not my cancel" → no TimeoutError
+   ```
+
+Suppression is the only approach that preserves worker control and is composable with `TaskGroup`, `asyncio.timeout`, and nested Fences.
 
 ### Pre-triggered behavior
 
@@ -73,15 +90,20 @@ Instead, pre-triggered Fences schedule `task.cancel()` via `call_soon` and let t
 - **No scope tree / shielding**: Nesting and shielding handled by asyncio itself (`asyncio.shield()`, `uncancel()` counting).
 - **Deadlines vs timeouts**: Core library works with relative timeouts (`TimeoutTrigger`). Deadlines (absolute time) are an application-layer concern — middleware converts remaining budget to `TimeoutTrigger(remaining)`.
 
-## Cross-Service Deadline Propagation
-
-```
-Client (timeout=30s)
-  -> Gateway: X-Request-Timeout: 30
-    -> spent 2s on auth/routing
-    -> Provider call: X-Request-Timeout: 28
-```
 
 Wire protocol is always relative duration. Each service converts to local timeout:
 - Incoming: `header_seconds` -> `TimeoutTrigger(header_seconds)`
 - Outgoing: `fence.remaining` -> header
+
+## Why This Complexity Is Necessary
+
+Fence is a generalized `asyncio.timeout()`. The stdlib timeout does the same cancel/uncancel/suppress dance — but only for one trigger type and converts to `TimeoutError`. Fence supports arbitrary triggers and suppresses instead of converting.
+
+Every piece exists because asyncio's counter protocol demands it:
+
+- **Counter snapshot** — needed to distinguish own cancel from outer cancel. `asyncio.timeout()` does the same.
+- **`call_soon` deferral** — calling `cancel()` synchronously sets `_must_cancel`, which `uncancel()` couldn't clear until 3.13. Deferring via `call_soon` ensures `cancel()` finds `_fut_waiter` set and never touches the flag.
+- **`_CancelToken`** — tracks "scheduled but not delivered" vs "delivered". Without this, a sync body completing before `call_soon` fires would leave a stale cancel in flight.
+- **Suppression** — the only correct exit strategy. The alternatives all cause the worker to lose control (post-block code never runs), and option 3 additionally breaks `asyncio.timeout` via counter inflation.
+
+There is no simpler way to implement this within asyncio's cancellation model. Cooperative flags (check-in-a-loop) would work but lose the ability to interrupt arbitrary `await` points. Not calling `task.cancel()` means not solving the problem.
