@@ -321,6 +321,44 @@ async def test__fence__when_second_trigger_fires_after_fence__then_post_fence_as
     assert asyncio.current_task().cancelling() == 0
 
 
+async def test__fence__when_event_reused_sequentially__then_waiters_clean():
+    loop = asyncio.get_running_loop()
+    event = asyncio.Event()
+
+    def pending_waiters() -> int:
+        return sum(1 for w in event._waiters if not w.done())
+
+    other_fut = loop.create_future()
+    event._waiters.append(other_fut)
+
+    assert pending_waiters() == 1
+
+    with Fence(EventTrigger(event)) as fence1:
+        assert pending_waiters() == 2
+        event.set()
+        await asyncio.sleep(1)
+
+    assert fence1.cancelled
+    assert pending_waiters() == 0
+    assert other_fut.done()
+
+    event.clear()
+    other_fut = loop.create_future()
+    event._waiters.append(other_fut)
+
+    assert pending_waiters() == 1
+
+    with Fence(EventTrigger(event)) as fence2:
+        assert pending_waiters() == 2
+        event.set()
+        await asyncio.sleep(1)
+
+    assert fence2.cancelled
+    assert pending_waiters() == 0
+    assert other_fut.done()
+    assert asyncio.current_task().cancelling() == 0
+
+
 async def test__fence__when_two_tasks_share_event__then_both_cancelled_and_waiters_cleaned():
     event = asyncio.Event()
 
