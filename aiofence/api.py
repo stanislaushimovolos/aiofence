@@ -13,7 +13,7 @@ _UNSET: Any = object()
 
 class FenceCancelled(Exception):  # noqa: N818
     """
-    Raised by ``Fencing.fail_on_cancel()`` when cancellation occurs.
+    Raised by ``Fencing.raise_on_cancel()`` when cancellation occurs.
     """
 
     def __init__(self, reasons: tuple[CancelReason, ...]) -> None:
@@ -110,7 +110,7 @@ class Fencing:
         return self._derive(_triggers=(*self._explicit_triggers, trigger))
 
     @contextmanager
-    def fail_on_cancel(self) -> Generator[Fence]:
+    def raise_on_cancel(self) -> Generator[Fence]:
         """
         Context manager that raises ``FenceCancelled`` on cancellation.
         """
@@ -175,3 +175,49 @@ class Fencing:
             _timeouts=self._timeouts if _timeouts is _UNSET else _timeouts,
             _explicit_triggers=self._explicit_triggers if _triggers is _UNSET else _triggers,
         )
+
+
+def on_timeout(delay: float, *, code: str | None = None) -> Fencing:
+    """
+    Create a Fencing with a relative timeout.
+
+    Args:
+        delay: Seconds until cancellation.
+        code: Machine-readable identifier for programmatic matching
+              via ``fence.cancelled_by(code)``.
+    """
+    return Fencing().timeout(delay, code=code)
+
+
+def on_deadline(when: float, *, code: str | None = None) -> Fencing:
+    """
+    Create a Fencing with an absolute monotonic deadline.
+
+    Args:
+        when: Absolute monotonic time (``loop.time()`` based).
+        code: Machine-readable identifier for programmatic matching
+              via ``fence.cancelled_by(code)``.
+    """
+    return Fencing().deadline(when, code=code)
+
+
+def on_event(event: asyncio.Event, *, code: str | None = None) -> Fencing:
+    """
+    Create a Fencing with an event-based cancellation condition.
+
+    Args:
+        event: asyncio.Event that triggers cancellation when set.
+        code: Machine-readable identifier for programmatic matching
+              via ``fence.cancelled_by(code)``.
+    """
+    return Fencing().event(event, code=code)
+
+
+def on_trigger(trigger: Trigger) -> Fencing:
+    """
+    Create a Fencing with a custom trigger.
+
+    Args:
+        trigger: A Trigger instance to arm when the Fence is entered.
+    """
+    return Fencing().trigger(trigger)
