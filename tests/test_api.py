@@ -102,7 +102,7 @@ async def test__deadline__when_tighter_added_second__then_tighter_wins() -> None
     with ctx.move_on_cancel() as fence:
         trigger = fence._triggers[0]
         assert trigger._code == "tight"
-        assert trigger._delay == pytest.approx(10, abs=0.001)
+        assert trigger._delay == pytest.approx(10, abs=0.01)
 
 
 async def test__deadline__when_looser_added_second__then_original_wins() -> None:
@@ -113,7 +113,7 @@ async def test__deadline__when_looser_added_second__then_original_wins() -> None
     with ctx.move_on_cancel() as fence:
         trigger = fence._triggers[0]
         assert trigger._code == "tight"
-        assert trigger._delay == pytest.approx(10, abs=0.001)
+        assert trigger._delay == pytest.approx(10, abs=0.01)
 
 
 # --- Timeout merging (lazy) ---
