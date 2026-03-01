@@ -5,10 +5,28 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from typing import Any
 
-from .core import Fence, Trigger
+from .core import CancelReason, Fence, Trigger
 from .triggers import EventTrigger, TimeoutTrigger
 
 _UNSET: Any = object()
+
+
+class FenceCancelled(Exception):  # noqa: N818
+    """
+    Raised by ``Fencing.fail_on_cancel()`` when cancellation occurs.
+    """
+
+    def __init__(self, reasons: tuple[CancelReason, ...]) -> None:
+        self.reasons = reasons
+        super().__init__(self._format_message())
+
+    def cancelled_by(self, code: str) -> bool:
+        return any(r.code == code for r in self.reasons)
+
+    def _format_message(self) -> str:
+        if len(self.reasons) == 1:
+            return self.reasons[0].message
+        return "; ".join(r.message for r in self.reasons)
 
 
 class Fencing:
@@ -90,6 +108,17 @@ class Fencing:
             trigger: A Trigger instance to arm when the Fence is entered.
         """
         return self._derive(_triggers=(*self._explicit_triggers, trigger))
+
+    @contextmanager
+    def fail_on_cancel(self) -> Generator[Fence]:
+        """
+        Context manager that raises ``FenceCancelled`` on cancellation.
+        """
+        fence = self._build_fence()
+        with fence:
+            yield fence
+        if fence.cancelled:
+            raise FenceCancelled(fence.reasons)
 
     @contextmanager
     def move_on_cancel(self) -> Generator[Fence]:
