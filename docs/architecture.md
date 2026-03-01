@@ -6,6 +6,10 @@
 - **`triggers/`** — built-in trigger implementations: `TimeoutTrigger`/`TimeoutHandle`, `EventTrigger`/`EventHandle`
 - **`__init__.py`** — public re-exports
 
+## API
+
+For usage guide, examples, and custom trigger documentation see [api.md](api.md).
+
 ## Core Concepts
 
 - **`Trigger`** — abstract cancellation condition. `check()` for synchronous pre-check, `arm(callback)` for async monitoring. Returns a `TriggerHandle`.
