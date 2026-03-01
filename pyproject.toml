@@ -33,6 +33,7 @@ dev = [
     "pytest-asyncio>=0.25",
     "pytest-cov>=6.0",
     "ruff>=0.15.2",
+    "starlette>=0.27",
     "uvloop>=0.21",
 ]
 

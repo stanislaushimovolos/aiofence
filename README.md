@@ -115,12 +115,43 @@ elif fence.cancelled_by("budget"):
 
 **Native asyncio** — works with asyncio's `cancel()`/`uncancel()` counter protocol. Compatible with `TaskGroup`, `asyncio.timeout()`. No new runtime, no dependencies.
 
+## Starlette / FastAPI
+
+`disconnect_fencing` binds a client-disconnect trigger to the current `Fencing` context. When the client disconnects, any active `Fence` is cancelled with `code="disconnect"`:
+
+```python
+from aiofence.contrib.starlette import disconnect_fencing
+
+@app.get("/work")
+async def handler(fencing: Fencing = Depends(disconnect_fencing)):
+    with fencing.move_on_cancel() as fence:
+        await long_work()
+
+    if fence.cancelled_by("disconnect"):
+        return Response(status_code=499)
+```
+
+Composes with other triggers — add a timeout on top:
+
+```python
+@app.get("/work")
+async def handler(fencing: Fencing = Depends(disconnect_fencing)):
+    with fencing.timeout(30, code="budget").move_on_cancel() as fence:
+        await long_work()
+```
+
+Requires `starlette` (installed with FastAPI). No additional dependencies.
+
 ## Documentation
 
 - [API Guide](docs/api.md) — usage, patterns, and examples
 - [Architecture](docs/architecture.md) — how it works, cancellation flow, design decisions
 - [Why Suppress](docs/why-suppress.md) — why `CancelledError` is suppressed instead of raised
 - [CPython Task Cancellation](docs/cpython-task-cancellation.md) — how `asyncio.Task` cancellation works under the hood
+
+## Caveats
+
+**Nested Fences are not supported.** Entering a `Fence` while another is active on the same task raises `RuntimeError`. Use sequential fences or `Fencing.current()` composition instead. See [#12](https://github.com/stanislaushimovolos/aiofence/issues/12) for details and progress.
 
 ## Requirements
 
