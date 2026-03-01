@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import AsyncGenerator
 
 from aiofence import Fencing, bind_fencing
-from aiofence.contrib.starlette import disconnect_fencing
+from aiofence.contrib.starlette import disconnect_event, disconnect_fencing
 
 
 class MockRequest:
@@ -25,7 +25,28 @@ async def _use_dependency(request: MockRequest, **kwargs: str) -> AsyncGenerator
         yield fencing
 
 
-# --- disconnect fires ---
+# --- disconnect_event ---
+
+
+async def test__disconnect_event__when_client_disconnects__then_event_set() -> None:
+    request = MockRequest()
+
+    async for event in disconnect_event(request):  # type: ignore[arg-type]
+        assert not event.is_set()
+        request.disconnect()
+        await asyncio.sleep(0)
+        assert event.is_set()
+
+
+async def test__disconnect_event__when_body_completes__then_listener_cleaned_up() -> None:
+    request = MockRequest()
+
+    async for event in disconnect_event(request):  # type: ignore[arg-type]
+        await asyncio.sleep(0)
+        assert not event.is_set()
+
+
+# --- disconnect_fencing: disconnect fires ---
 
 
 async def test__disconnect_fencing__when_client_disconnects__then_fence_cancelled() -> None:
