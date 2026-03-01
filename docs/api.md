@@ -60,7 +60,7 @@ Available builder methods:
 | Method | Description |
 |--------|-------------|
 | `.timeout(delay, *, code=None)` | Add a relative timeout |
-| `.deadline(when, *, code=None)` | Add an absolute deadline |
+| `.deadline(when, *, code=None)` | Add an absolute deadline (`loop.time()` based) |
 | `.event(event, *, code=None)` | Add an event condition |
 | `.trigger(trigger)` | Add a custom trigger |
 
@@ -232,3 +232,66 @@ with Fence(TimeoutTrigger(5), EventTrigger(shutdown, code="shutdown")) as fence:
 ```
 
 `Fence` always suppresses `CancelledError`. It doesn't raise `FenceCancelled` — for that, use `Fencing.raise_on_cancel()`.
+
+## Starlette / FastAPI Integration
+
+`aiofence.contrib.starlette` provides a FastAPI dependency that cancels the current `Fencing` when the client disconnects.
+
+```python
+from fastapi import Depends, FastAPI
+from aiofence import Fencing
+from aiofence.contrib.starlette import disconnect_fencing
+
+app = FastAPI()
+
+@app.get("/work")
+async def handler(fencing: Fencing = Depends(disconnect_fencing)):
+    with fencing.move_on_cancel() as fence:
+        await long_work()
+
+    if fence.cancelled_by("disconnect"):
+        return Response(status_code=499)
+```
+
+`disconnect_fencing` does three things:
+
+1. Creates an `asyncio.Event` that fires on `http.disconnect`
+2. Adds it to `Fencing.current()` with `code="disconnect"` (or a custom code)
+3. Binds the result as the active `Fencing` context via `bind_fencing()`
+
+### Composing with other triggers
+
+The returned `Fencing` inherits from the current context, so you can chain additional triggers:
+
+```python
+@app.get("/work")
+async def handler(fencing: Fencing = Depends(disconnect_fencing)):
+    with fencing.timeout(30, code="budget").move_on_cancel() as fence:
+        await long_work()
+
+    if fence.cancelled_by("budget"):
+        return cached_result
+    elif fence.cancelled_by("disconnect"):
+        return Response(status_code=499)
+```
+
+Inner code can also access the disconnect trigger via `Fencing.current()`:
+
+```python
+@app.get("/work")
+async def handler(fencing: Fencing = Depends(disconnect_fencing)):
+    await process()
+
+async def process():
+    with Fencing.current().move_on_cancel() as fence:
+        await do_work()  # cancelled if client disconnects
+```
+
+### Custom disconnect code
+
+```python
+async def handler(
+    fencing: Fencing = Depends(lambda r: disconnect_fencing(r, code="client_gone")),
+):
+    ...
+```

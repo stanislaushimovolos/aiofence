@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import AsyncGenerator
 
 from aiofence import Fencing, bind_fencing
-from aiofence.contrib.fastapi import disconnect_fencing
+from aiofence.contrib.starlette import disconnect_fencing
 
 
 class MockRequest:
