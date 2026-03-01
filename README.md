@@ -79,6 +79,42 @@ anyio is one of the best async libraries in the Python ecosystem, and its `Cance
 
 2. **Different design philosophy.** anyio's approach is a broad `CancelScope` over the whole operation, with `CancelScope(shield=True)` around the parts that must survive. aiofence takes the inverse: most code runs unaware of cancellation, and you wrap only the expensive, safely-interruptible parts with a `Fence`.
 
+## Features
+
+**Composable triggers** — chain timeouts, events, deadlines, and custom triggers into a single `Fencing`. Each call returns a new immutable builder, so configs are safe to share and extend:
+
+```python
+fencing = on_timeout(30, code="budget").event(shutdown, code="shutdown")
+
+# extend per-operation
+with fencing.timeout(5, code="db").move_on_cancel() as fence:
+    await query_db()
+```
+
+**Context propagation** — store a `Fencing` in a `ContextVar` at the boundary, read it anywhere with `Fencing.current()`. No need to pass configs through every call signature:
+
+```python
+# HTTP handler boundary
+with bind_fencing(on_event(disconnect, code="disconnect").timeout(30)):
+    await handle_request()
+
+# deep inside, no arguments needed
+async def process():
+    with Fencing.current().move_on_cancel() as fence:
+        await do_work()
+```
+
+**Typed cancellation reasons** — after cancellation, inspect *which* trigger fired. Each reason carries a machine-readable `code` for programmatic matching:
+
+```python
+if fence.cancelled_by("disconnect"):
+    log("client left")
+elif fence.cancelled_by("budget"):
+    return cached_result
+```
+
+**Native asyncio** — works with asyncio's `cancel()`/`uncancel()` counter protocol. Compatible with `TaskGroup`, `asyncio.timeout()`. No new runtime, no dependencies.
+
 ## Documentation
 
 - [API Guide](docs/api.md) — usage, patterns, and examples
