@@ -3,10 +3,13 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Generator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 
 from .core import CancelReason, Fence, Trigger
 from .triggers import EventTrigger, TimeoutTrigger
+
+_current_fencing: ContextVar[Fencing | None] = ContextVar("current_fencing", default=None)
 
 _UNSET: Any = object()
 
@@ -49,6 +52,14 @@ class Fencing:
         self._deadline_code = _deadline_code
         self._timeouts = _timeouts
         self._explicit_triggers = _explicit_triggers
+
+    @classmethod
+    def current(cls) -> Fencing:
+        """
+        Return the Fencing from the current context, or an empty Fencing
+        if none is active.
+        """
+        return _current_fencing.get() or cls()
 
     def timeout(self, delay: float, *, code: str | None = None) -> Fencing:
         """
@@ -221,3 +232,16 @@ def on_trigger(trigger: Trigger) -> Fencing:
         trigger: A Trigger instance to arm when the Fence is entered.
     """
     return Fencing().trigger(trigger)
+
+
+@contextmanager
+def bind_fencing(fencing: Fencing) -> Generator[None, None, None]:
+    """
+    Set the given Fencing as the current context. Inner code can read it
+    with ``Fencing.current()``.
+    """
+    token = _current_fencing.set(fencing)
+    try:
+        yield
+    finally:
+        _current_fencing.reset(token)
