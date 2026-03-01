@@ -117,27 +117,46 @@ elif fence.cancelled_by("budget"):
 
 ## Starlette / FastAPI
 
-`disconnect_fencing` binds a client-disconnect trigger to the current `Fencing` context. When the client disconnects, any active `Fence` is cancelled with `code="disconnect"`:
+`disconnect_fencing` binds a client-disconnect trigger to the current `Fencing` context via `bind_fencing()`. When the client disconnects, any active `Fence` — anywhere in the call stack — is cancelled with `code="disconnect"`:
 
 ```python
 from aiofence.contrib.starlette import disconnect_fencing
 
 @app.get("/work")
 async def handler(fencing: Fencing = Depends(disconnect_fencing)):
-    with fencing.move_on_cancel() as fence:
+    with fencing.timeout(30, code="budget").move_on_cancel() as fence:
         await long_work()
 
     if fence.cancelled_by("disconnect"):
         return Response(status_code=499)
 ```
 
-Composes with other triggers — add a timeout on top:
+The real value is that `disconnect_fencing` calls `bind_fencing()` internally, so service-layer code doesn't need to know about HTTP, requests, or disconnect events — it reads the cancellation context via `Fencing.current()`:
 
 ```python
-@app.get("/work")
-async def handler(fencing: Fencing = Depends(disconnect_fencing)):
-    with fencing.timeout(30, code="budget").move_on_cancel() as fence:
-        await long_work()
+# handler — declares cancellation sources at the boundary
+@app.get("/generate")
+async def handler(
+    prompt: str,
+    fencing: Fencing = Depends(disconnect_fencing),
+):
+    result = await generate_response(prompt)
+    return {"status": "ok", "result": result}
+
+# service layer — no request, no fencing in the signature
+async def generate_response(prompt: str) -> str:
+    with (
+        Fencing.current()
+        .timeout(30, code="budget")
+        .move_on_cancel()
+    ) as fence:
+        result = await llm.generate(prompt)
+
+    if fence.cancelled_by("disconnect"):
+        return "client disconnected, skipping"
+    if fence.cancelled_by("budget"):
+        return await get_cached_response(prompt)
+    return result
 ```
 
 Requires `starlette` (installed with FastAPI). No additional dependencies.
