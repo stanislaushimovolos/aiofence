@@ -32,14 +32,26 @@ For a deeper dive into the problem and design rationale, see [this Medium post](
 `aiofence` solves this. Declare all cancellation sources once, composably. The callee doesn't even know cancellation exists:
 
 ```python
-with Fence(TimeoutTrigger(30), EventTrigger(shutdown, code="shutdown")) as fence:
+with (
+    on_timeout(30)
+    .event(shutdown, code="shutdown")
+    .move_on_cancel()
+) as fence:
     result = await fetch_and_transform()
 
 if not fence.cancelled:
     await save(result)
 else:
-    print(fence.reasons)       # (CancelReason(message='timed out after 30s', ...),)
+    print(fence.reasons)              # (CancelReason(message='timed out after 30s', ...),)
     print(fence.cancelled_by("shutdown"))  # True / False
+```
+
+Or raise instead of inspect:
+
+```python
+with on_timeout(30).raise_on_cancel() as fence:
+    result = await fetch_and_transform()
+# raises FenceCancelled if timed out
 ```
 
 ### What about `asyncio.shield()`?
@@ -49,7 +61,11 @@ else:
 aiofence comes at it differently: most code doesn't know cancellation exists. You only wrap the expensive, safely-interruptible parts — the operations you *want* to cancel. For example, in an LLM inference service, you don't want to cancel database queries or response formatting. You want to cancel the LLM call that's burning GPU time for a client that already disconnected:
 
 ```python
-with Fence(EventTrigger(client_disconnect), TimeoutTrigger(budget)) as fence:
+with (
+    on_event(client_disconnect)
+    .timeout(budget)
+    .move_on_cancel()
+) as fence:
     result = await llm.generate(prompt)  # cancellable
 
 await db.save(result or fallback)  # always runs, no shield needed
@@ -63,9 +79,12 @@ anyio is one of the best async libraries in the Python ecosystem, and its `Cance
 
 2. **Different design philosophy.** anyio's approach is a broad `CancelScope` over the whole operation, with `CancelScope(shield=True)` around the parts that must survive. aiofence takes the inverse: most code runs unaware of cancellation, and you wrap only the expensive, safely-interruptible parts with a `Fence`.
 
-## How It Works
+## Documentation
 
-`Fence` is a sync context manager that arms triggers against the current asyncio task. When a trigger fires, the task is cancelled via asyncio's native `cancel()`/`uncancel()` counter protocol. On exit, the `CancelledError` is suppressed and the counter is balanced. The caller inspects `fence.cancelled` and `fence.reasons` after the block. Just asyncio's own machinery, used correctly.
+- [API Guide](docs/api.md) — usage, patterns, and examples
+- [Architecture](docs/architecture.md) — how it works, cancellation flow, design decisions
+- [Why Suppress](docs/why-suppress.md) — why `CancelledError` is suppressed instead of raised
+- [CPython Task Cancellation](docs/cpython-task-cancellation.md) — how `asyncio.Task` cancellation works under the hood
 
 ## Requirements
 

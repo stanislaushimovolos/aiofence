@@ -130,10 +130,15 @@ class Fence:
             for guard in self._exit_handlers:
                 guard.disarm()
 
-        if self._cancel_token is None:
-            return False
+        try:
+            if self._cancel_token is None:
+                return False
 
-        return self._cancel_token.resolve(exc_type)
+            return self._cancel_token.resolve(exc_type)
+        finally:
+            self._current_task = None
+            self._cancel_token = None
+            self._exit_handlers = []
 
     def _on_trigger(self, reason: CancelReason) -> None:
         self._cancel_reasons.append(reason)
