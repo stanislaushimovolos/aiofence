@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Any, Self
+from weakref import WeakKeyDictionary
 
 
 class CancelType(Enum):
@@ -29,6 +30,8 @@ class CancelReason:
 
 
 CancelCallback = Callable[[CancelReason], None]
+
+_active_fences: WeakKeyDictionary[asyncio.Task[Any], Fence] = WeakKeyDictionary()
 
 
 class Trigger(ABC):
@@ -99,6 +102,14 @@ class Fence:
 
         task = asyncio.current_task()
         assert task is not None  # noqa: S101
+
+        if task in _active_fences:
+            raise RuntimeError(
+                "Nested Fences are not supported. "
+                "See https://github.com/stanislaushimovolos/aiofence/issues/12"
+            )
+
+        _active_fences[task] = self
         self._current_task = task
         self._cancelling = task.cancelling()
 
@@ -136,6 +147,8 @@ class Fence:
 
             return self._cancel_token.resolve(exc_type)
         finally:
+            if self._current_task is not None:
+                _active_fences.pop(self._current_task, None)
             self._current_task = None
             self._cancel_token = None
             self._exit_handlers = []
