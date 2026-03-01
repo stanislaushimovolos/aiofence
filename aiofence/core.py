@@ -149,6 +149,8 @@ class Fence:
         finally:
             if self._current_task is not None:
                 _active_fences.pop(self._current_task, None)
+
+            # remove references to allow GC collect objects
             self._current_task = None
             self._cancel_token = None
             self._exit_handlers = []
