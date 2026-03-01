@@ -1,4 +1,5 @@
 from .__version__ import __version__
+from .api import Fencing
 from .core import (
     CancelReason,
     CancelType,
@@ -19,6 +20,7 @@ __all__ = [
     "EventHandle",
     "EventTrigger",
     "Fence",
+    "Fencing",
     "TimeoutHandle",
     "TimeoutTrigger",
     "Trigger",
