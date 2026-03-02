@@ -91,16 +91,16 @@ with fencing.timeout(5, code="db").move_on_cancel() as fence:
     await query_db()
 ```
 
-**Context propagation** — store a `Fencing` in a `ContextVar` at the boundary, read it anywhere with `Fencing.current()`. No need to pass configs through every call signature:
+**Context propagation** — store a `Fencing` in a `ContextVar` at the boundary, read it anywhere with `get_fencing_defaults()`. No need to pass configs through every call signature:
 
 ```python
 # HTTP handler boundary
-with bind_fencing(on_event(disconnect, code="disconnect").timeout(30)):
+with bind_fencing_defaults(on_event(disconnect, code="disconnect").timeout(30)):
     await handle_request()
 
 # deep inside, no arguments needed
 async def process():
-    with Fencing.current().move_on_cancel() as fence:
+    with get_fencing_defaults().move_on_cancel() as fence:
         await do_work()
 ```
 
@@ -117,7 +117,7 @@ elif fence.cancelled_by("budget"):
 
 ## Starlette / FastAPI
 
-`disconnect_fencing` binds a client-disconnect trigger to the current `Fencing` context via `bind_fencing()`. When the client disconnects, any active `Fence` — anywhere in the call stack — is cancelled with `code="disconnect"`:
+`disconnect_fencing` binds a client-disconnect trigger to the current `Fencing` context via `bind_fencing_defaults()`. When the client disconnects, any active `Fence` — anywhere in the call stack — is cancelled with `code="disconnect"`:
 
 ```python
 from aiofence.contrib.starlette import disconnect_fencing
@@ -131,7 +131,7 @@ async def handler(fencing: Fencing = Depends(disconnect_fencing)):
         return Response(status_code=499)
 ```
 
-The real value is that `disconnect_fencing` calls `bind_fencing()` internally, so service-layer code doesn't need to know about HTTP, requests, or disconnect events — it reads the cancellation context via `Fencing.current()`:
+The real value is that `disconnect_fencing` calls `bind_fencing_defaults()` internally, so service-layer code doesn't need to know about HTTP, requests, or disconnect events — it reads the cancellation context via `get_fencing_defaults()`:
 
 ```python
 from aiofence.contrib.starlette import disconnect_fencing
@@ -149,7 +149,7 @@ async def handler(
 async def generate_response(prompt: str) -> str:
     # canceled on timeout or global disconnect event
     with (
-        Fencing.current()
+        get_fencing_defaults()
         .timeout(30, code="budget")
         .move_on_cancel()
     ) as fence:
@@ -173,7 +173,7 @@ Requires `starlette` (installed with FastAPI). No additional dependencies.
 
 ## Caveats
 
-**Nested Fences are not supported.** Entering a `Fence` while another is active on the same task raises `RuntimeError`. Use sequential fences or `Fencing.current()` composition instead. See [#12](https://github.com/stanislaushimovolos/aiofence/issues/12) for details and progress.
+**Nested Fences are not supported.** Entering a `Fence` while another is active on the same task raises `RuntimeError`. Use sequential fences or `get_fencing_defaults()` composition instead. See [#12](https://github.com/stanislaushimovolos/aiofence/issues/12) for details and progress.
 
 ## Requirements
 
