@@ -6,11 +6,11 @@
 
 [![codecov](https://codecov.io/gh/stanislaushimovolos/aiofence/branch/main/graph/badge.svg)](https://codecov.io/gh/stanislaushimovolos/aiofence)
 
-Multi-reason cancellation contexts for Python asyncio. Inspired by Go's `context.Context`, aiofence provides a cancellation context that propagates hierarchically through your application via `ContextVar` — no need to thread events, flags, or tokens through every call signature. Declare cancellation sources once at the boundary — inner code just wraps cancellable work in a context manager and doesn't care about the actual reasons, though it can inspect them if needed.
+Multi-reason cancellation contexts for Python asyncio. Inspired by Go's `context.Context`, `aiofence` provides a cancellation context that propagates hierarchically through your application via `ContextVar` — no need to thread events, flags, or tokens through every call signature. Declare cancellation sources once at the boundary — inner code just wraps cancellable work in a context manager and doesn't care about the actual reasons, though it can inspect them if needed.
 
 ## Motivation
 
-asyncio can cancel tasks mechanically — `task.cancel()`, `asyncio.timeout()` — but it can't tell you *why* you were cancelled or let you control *when*. Your task is abruptly killed at the next `await`, whether it's ready or not. When multiple cancellation sources exist (timeout, client disconnect, graceful shutdown), user code is forced to propagate events and flags through every call signature, spawn background listeners that watch for signals and cancel your task, and shield cleanup code so that a second cancel request doesn't kill the task mid-cleanup. Without a single centralized object that owns all of this, it gets messy fast:
+`asyncio` has been steadily adopting structured concurrency patterns — `TaskGroup` (3.11) and `asyncio.timeout()` (3.11) both came from `trio` and `anyio`. But one gap remains: `asyncio` can cancel tasks mechanically, but it can't tell you *why* you were cancelled, doesn't offer a non-raising timeout (`move_on_after`), and forces you to propagate cancellation sources through every call signature. When multiple sources exist (timeout, client disconnect, graceful shutdown), it gets messy fast:
 
 ```python
 async def handle_request(request, shutdown_event, timeout=30):
@@ -58,7 +58,7 @@ with on_timeout(30).raise_on_cancel() as fence:
 
 `shield()` prevents cancellation from reaching shielded code, but it works from the opposite direction — you protect everything that *must not* be cancelled. In practice this means wrapping database writes, state transitions, logging, and cleanup individually, and each function needs to know whether it's cancel-safe.
 
-aiofence comes at it differently: most code doesn't know cancellation exists. You only wrap the expensive, safely-interruptible parts — the operations you *want* to cancel. For example, in an LLM inference service, you don't want to cancel database queries or response formatting. You want to cancel the LLM call that's burning GPU time for a client that already disconnected:
+`aiofence` comes at it differently: most code doesn't know cancellation exists. You only wrap the expensive, safely-interruptible parts — the operations you *want* to cancel. For example, in an LLM inference service, you don't want to cancel database queries or response formatting. You want to cancel the LLM call that's burning GPU time for a client that already disconnected:
 
 ```python
 with (
@@ -71,13 +71,13 @@ with (
 await db.save(result or fallback)  # always runs, no shield needed
 ```
 
-### Why not anyio?
+### Why not `anyio`?
 
-anyio is one of the best async libraries in the Python ecosystem, and its `CancelScope` is a more powerful and general cancellation model than what asyncio provides natively. aiofence is narrower in scope and makes different trade-offs:
+`anyio` is one of the best async libraries in the Python ecosystem, and its `CancelScope` is a more powerful and general cancellation model than what `asyncio` provides natively. `aiofence` is narrower in scope and makes different trade-offs:
 
-1. **Drop-in for existing asyncio code.** anyio introduces its own cancellation semantics (`CancelScope`, level-triggered cancellation, nested scope trees). If your app is already built on pure asyncio, adopting anyio's model is a significant migration. aiofence works directly with asyncio's `cancel()`/`uncancel()` counter protocol — no new runtime, no new cancellation model.
+1. **Drop-in for existing asyncio code.** `anyio` builds an explicit scope tree that replaces asyncio's cancellation model — its own cancel delivery, shielding, deadline aggregation, and cross-task propagation. If your app is already built on pure asyncio, adopting `anyio` is a significant migration. `aiofence` works directly with asyncio's `cancel()`/`uncancel()` counter protocol — no new runtime, no new cancellation model. If asyncio evolves its cancellation primitives, `aiofence` stays compatible.
 
-2. **Different design philosophy.** anyio's approach is a broad `CancelScope` over the whole operation, with `CancelScope(shield=True)` around the parts that must survive. aiofence takes the inverse: most code runs unaware of cancellation, and you wrap only the expensive, safely-interruptible parts with a `Fence`.
+2. **Different design philosophy.** `anyio`'s approach is a broad `CancelScope` over the whole operation, with `CancelScope(shield=True)` around the parts that must survive. `aiofence` takes the inverse: most code runs unaware of cancellation, and you wrap only the expensive, safely-interruptible parts with a `Fence`.
 
 ## Features
 
@@ -134,17 +134,20 @@ async def handler(fencing: Fencing = Depends(disconnect_fencing)):
 The real value is that `disconnect_fencing` calls `bind_fencing()` internally, so service-layer code doesn't need to know about HTTP, requests, or disconnect events — it reads the cancellation context via `Fencing.current()`:
 
 ```python
+from aiofence.contrib.starlette import disconnect_fencing
+
 # handler — declares cancellation sources at the boundary
 @app.get("/generate")
 async def handler(
     prompt: str,
-    fencing: Fencing = Depends(disconnect_fencing),
+    _ = Depends(disconnect_fencing),
 ):
     result = await generate_response(prompt)
     return {"status": "ok", "result": result}
 
 # service layer — no request, no fencing in the signature
 async def generate_response(prompt: str) -> str:
+    # canceled on timeout or global disconnect event
     with (
         Fencing.current()
         .timeout(30, code="budget")
