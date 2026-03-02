@@ -192,33 +192,33 @@ elif fence.cancelled:
 
 ## Context Propagation
 
-`bind_fencing()` stores a `Fencing` in a `ContextVar`, so inner code can access it via `Fencing.current()` without passing it through every call signature.
+`bind_fencing_defaults()` stores a `Fencing` in a `ContextVar`, so inner code can access it via `get_fencing_defaults()` without passing it through every call signature.
 
 ```python
-from aiofence import Fencing, bind_fencing, on_event
+from aiofence import Fencing, bind_fencing_defaults, get_fencing_defaults, on_event
 
 # Boundary: declare the rules
 fencing = on_event(disconnect, code="disconnect").timeout(30)
-with bind_fencing(fencing):
+with bind_fencing_defaults(fencing):
     await handle_request()
 
 # Deep inside: read and use
 async def process():
-    with Fencing.current().move_on_cancel() as fence:
+    with get_fencing_defaults().move_on_cancel() as fence:
         await do_work()
 
 # Or extend with local concerns:
 async def process_with_extra():
-    with Fencing.current().event(other_event).move_on_cancel() as fence:
+    with get_fencing_defaults().event(other_event).move_on_cancel() as fence:
         await do_work()
 ```
 
 ### Semantics
 
-- **`bind_fencing()` only stores config** — it does not create a Fence. `move_on_cancel()` / `raise_on_cancel()` materialize Fences from it.
-- **Token-based set/reset** — nesting works naturally. Inner `bind_fencing()` overrides, outer is restored on exit.
+- **`bind_fencing_defaults()` only stores config** — it does not create a Fence. `move_on_cancel()` / `raise_on_cancel()` materialize Fences from it.
+- **Token-based set/reset** — nesting works naturally. Inner `bind_fencing_defaults()` overrides, outer is restored on exit.
 - **Task inheritance** — `asyncio.create_task()` copies the `ContextVar` automatically. Child tasks inherit the boundary's config without affecting the parent.
-- **`Fencing.current()` with no context** — returns an empty `Fencing()`, so chaining always works: `Fencing.current().timeout(5)`.
+- **`get_fencing_defaults()` with no context** — returns an empty `Fencing()`, so chaining always works: `get_fencing_defaults().timeout(5)`.
 
 ## Low-Level API: Fence
 
@@ -256,8 +256,8 @@ async def handler(fencing: Fencing = Depends(disconnect_fencing)):
 `disconnect_fencing` does three things:
 
 1. Creates an `asyncio.Event` that fires on `http.disconnect`
-2. Adds it to `Fencing.current()` with `code="disconnect"` (or a custom code)
-3. Binds the result as the active `Fencing` context via `bind_fencing()`
+2. Adds it to `get_fencing_defaults()` with `code="disconnect"` (or a custom code)
+3. Binds the result as the active `Fencing` context via `bind_fencing_defaults()`
 
 ### Composing with other triggers
 
@@ -275,7 +275,7 @@ async def handler(fencing: Fencing = Depends(disconnect_fencing)):
         return Response(status_code=499)
 ```
 
-Inner code can also access the disconnect trigger via `Fencing.current()`:
+Inner code can also access the disconnect trigger via `get_fencing_defaults()`:
 
 ```python
 @app.get("/work")
@@ -283,7 +283,7 @@ async def handler(fencing: Fencing = Depends(disconnect_fencing)):
     await process()
 
 async def process():
-    with Fencing.current().move_on_cancel() as fence:
+    with get_fencing_defaults().move_on_cancel() as fence:
         await do_work()  # cancelled if client disconnects
 ```
 

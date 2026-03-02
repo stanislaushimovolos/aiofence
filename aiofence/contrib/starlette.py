@@ -6,7 +6,7 @@ from contextlib import suppress
 
 from starlette.requests import Request
 
-from aiofence import Fencing, bind_fencing
+from aiofence import Fencing, bind_fencing_defaults, get_fencing_defaults
 
 
 async def disconnect_event(request: Request) -> AsyncGenerator[asyncio.Event]:
@@ -36,7 +36,7 @@ async def disconnect_fencing(
     """
     FastAPI dependency that cancels the current Fencing when the client disconnects.
 
-    Builds on ``disconnect_event`` — adds the event to ``Fencing.current()``
+    Builds on ``disconnect_event`` — adds the event to ``get_fencing_defaults()``
     and binds it as the active context.
 
     Usage::
@@ -49,8 +49,8 @@ async def disconnect_fencing(
                 ...
     """
     async for event in disconnect_event(request):
-        fencing = Fencing.current().event(event, code=code)
-        with bind_fencing(fencing):
+        fencing = get_fencing_defaults().event(event, code=code)
+        with bind_fencing_defaults(fencing):
             yield fencing
 
 

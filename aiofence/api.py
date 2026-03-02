@@ -9,7 +9,7 @@ from typing import Any
 from .core import CancelReason, Fence, Trigger
 from .triggers import EventTrigger, TimeoutTrigger
 
-_current_fencing: ContextVar[Fencing | None] = ContextVar("current_fencing", default=None)
+_fencing_defaults: ContextVar[Fencing | None] = ContextVar("fencing_defaults", default=None)
 
 _UNSET: Any = object()
 
@@ -52,14 +52,6 @@ class Fencing:
         self._deadline_code = _deadline_code
         self._timeouts = _timeouts
         self._explicit_triggers = _explicit_triggers
-
-    @classmethod
-    def current(cls) -> Fencing:
-        """
-        Return the Fencing from the current context, or an empty Fencing
-        if none is active.
-        """
-        return _current_fencing.get() or cls()
 
     def timeout(self, delay: float, *, code: str | None = None) -> Fencing:
         """
@@ -234,14 +226,22 @@ def on_trigger(trigger: Trigger) -> Fencing:
     return Fencing().trigger(trigger)
 
 
+def get_fencing_defaults() -> Fencing:
+    """
+    Return the Fencing defaults from the current context, or an empty
+    Fencing if none is bound.
+    """
+    return _fencing_defaults.get() or Fencing()
+
+
 @contextmanager
-def bind_fencing(fencing: Fencing) -> Generator[None, None, None]:
+def bind_fencing_defaults(fencing: Fencing) -> Generator[None, None, None]:
     """
-    Set the given Fencing as the current context. Inner code can read it
-    with ``Fencing.current()``.
+    Set the given Fencing as the defaults for the current context.
+    Inner code can read it with ``get_fencing_defaults()``.
     """
-    token = _current_fencing.set(fencing)
+    token = _fencing_defaults.set(fencing)
     try:
         yield
     finally:
-        _current_fencing.reset(token)
+        _fencing_defaults.reset(token)
