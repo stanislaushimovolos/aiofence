@@ -23,7 +23,7 @@ with Fence(TimeoutTrigger(30), EventTrigger(shutdown, code="shutdown")) as fence
     await do_work()
 
 if fence.cancelled:
-    print(fence.reasons)              # (CancelReason(message='timed out after 30s', ...),)
+    print(fence.cancel_reasons)       # (CancelReason(message='timed out after 30s', ...),)
     print(fence.cancelled_by("shutdown"))  # True / False
 ```
 

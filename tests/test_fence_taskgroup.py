@@ -19,6 +19,7 @@ async def test__fence__when_trigger_fires_in_tg_body__then_tg_exits_normally():
 
         result = "continued"
 
+    assert fence.suppressed
     assert fence.cancelled
     assert result == "continued"
 
@@ -35,6 +36,7 @@ async def test__fence__when_pretriggered_in_tg_body__then_tg_exits_normally():
 
         result = "continued"
 
+    assert fence.suppressed
     assert fence.cancelled
     assert result == "continued"
 
@@ -44,30 +46,33 @@ async def test__fence__when_pretriggered_in_tg_body__then_tg_exits_normally():
 
 async def test__fence__when_trigger_fires_in_child_task__then_tg_unaffected():
     child_result = None
+    child_cancelled = None
 
     async def child():
-        nonlocal child_result
+        nonlocal child_result, child_cancelled
         fence = Fence(TimeoutTrigger(0.001))
         with fence:
             await asyncio.sleep(1)
-        child_result = fence.cancelled
+        child_result = fence.suppressed
+        child_cancelled = fence.cancelled
 
     async with asyncio.TaskGroup() as tg:
         tg.create_task(child())
 
     assert child_result is True
+    assert child_cancelled is True
 
 
 async def test__fence__when_child_fails_while_another_fenced__then_yields_to_tg():
-    fence_cancelled = None
+    was_suppressed = None
     fence_suppressed = None
 
     async def fenced_child():
-        nonlocal fence_cancelled, fence_suppressed
+        nonlocal was_suppressed, fence_suppressed
         fence = Fence(EventTrigger(asyncio.Event()))  # never fires
         with fence:
             await asyncio.sleep(10)
-        fence_cancelled = fence.cancelled
+        was_suppressed = fence.suppressed
         fence_suppressed = True  # should not reach
 
     async def failing_child():
@@ -80,12 +85,12 @@ async def test__fence__when_child_fails_while_another_fenced__then_yields_to_tg(
             tg.create_task(failing_child())
 
     assert exc_info.group_contains(ValueError)
-    assert fence_cancelled is None  # never reached — CancelledError propagated
+    assert was_suppressed is None  # never reached — CancelledError propagated
     assert fence_suppressed is None
 
 
 async def test__fence__when_child_fails_while_body_fenced__then_yields_to_tg():
-    fence_cancelled = None
+    was_suppressed = None
     reached_after_fence = False
 
     async def failing_child():
@@ -100,15 +105,16 @@ async def test__fence__when_child_fails_while_body_fenced__then_yields_to_tg():
             with fence:
                 await asyncio.sleep(10)
             reached_after_fence = True
-            fence_cancelled = fence.cancelled
+            was_suppressed = fence.suppressed
 
     assert exc_info.group_contains(ValueError)
     assert not reached_after_fence  # TG cancelled the body
-    assert fence_cancelled is None  # never reached
+    assert was_suppressed is None  # never reached
 
 
 async def test__fence__when_trigger_fires_during_tg_teardown__then_yields_to_tg():
     cancel_event = asyncio.Event()
+    fence_suppressed = None
     fence_cancelled = None
 
     async def failing_child():
@@ -125,20 +131,24 @@ async def test__fence__when_trigger_fires_during_tg_teardown__then_yields_to_tg(
                 with fence:
                     await asyncio.sleep(10)
             finally:
+                fence_suppressed = fence.suppressed
                 fence_cancelled = fence.cancelled
 
     assert exc_info.group_contains(ValueError)
-    assert fence_cancelled is True  # trigger fired, but Fence yielded to TG
+    assert fence_suppressed is False  # trigger fired, but Fence yielded to TG (not suppressed)
+    assert fence_cancelled is True
 
 
 async def test__fence__when_outer_fence_wraps_tg_with_inner_fence__then_independent():
+    inner_suppressed = None
     inner_cancelled = None
 
     async def child():
-        nonlocal inner_cancelled
+        nonlocal inner_suppressed, inner_cancelled
         inner = Fence(TimeoutTrigger(0.001))
         with inner:
             await asyncio.sleep(1)
+        inner_suppressed = inner.suppressed
         inner_cancelled = inner.cancelled
 
     outer = Fence(EventTrigger(asyncio.Event()))  # never fires
@@ -146,7 +156,9 @@ async def test__fence__when_outer_fence_wraps_tg_with_inner_fence__then_independ
         async with asyncio.TaskGroup() as tg:
             tg.create_task(child())
 
+    assert inner_suppressed is True
     assert inner_cancelled is True
+    assert not outer.suppressed
     assert not outer.cancelled
 
 
@@ -163,6 +175,7 @@ async def test__fence__when_tg_body_raises_inside_fence__then_excgroup_propagate
                 raise ValueError("body boom")
 
     assert exc_info.group_contains(ValueError)
+    assert not fence.suppressed
     assert not fence.cancelled
 
 
@@ -178,6 +191,7 @@ async def test__fence__when_tg_child_fails_inside_fence__then_excgroup_propagate
                 tg.create_task(failing())
 
     assert exc_info.group_contains(ValueError)
+    assert not fence.suppressed
     assert not fence.cancelled
 
 
@@ -200,11 +214,13 @@ async def test__fence__when_trigger_fires_while_tg_active__then_fence_suppresses
         async with asyncio.TaskGroup() as tg:
             tg.create_task(long_child())
 
+    assert fence.suppressed
     assert fence.cancelled
     assert child_was_cancelled is True
 
 
 async def test__fence__when_tg_externally_cancelled_with_body_fenced__then_propagates():
+    fence_suppressed = None
     fence_cancelled = None
     child_was_cancelled = None
 
@@ -217,7 +233,7 @@ async def test__fence__when_tg_externally_cancelled_with_body_fenced__then_propa
             raise
 
     async def body():
-        nonlocal fence_cancelled
+        nonlocal fence_suppressed, fence_cancelled
         fence = Fence(EventTrigger(asyncio.Event()))  # never fires
         try:
             with fence:
@@ -225,6 +241,7 @@ async def test__fence__when_tg_externally_cancelled_with_body_fenced__then_propa
                     tg.create_task(long_child())
                     await asyncio.sleep(10)
         finally:
+            fence_suppressed = fence.suppressed
             fence_cancelled = fence.cancelled
 
     task = asyncio.get_running_loop().create_task(body())
@@ -236,26 +253,29 @@ async def test__fence__when_tg_externally_cancelled_with_body_fenced__then_propa
 
     assert task.cancelled()
     assert child_was_cancelled is True  # TG cancelled its child during teardown
-    assert fence_cancelled is False  # Fence's trigger never fired
+    assert fence_suppressed is False  # Fence's trigger never fired
+    assert fence_cancelled is False
 
 
 # --- Simultaneous: Fence trigger + child failure ---
 
 
 async def test__fence__when_trigger_and_child_fail_simultaneously__then_excgroup():
+    fence_suppressed = None
     fence_cancelled = None
 
     async def failing():
         raise ValueError("boom")
 
     async def fenced_body():
-        nonlocal fence_cancelled
+        nonlocal fence_suppressed, fence_cancelled
         fence = Fence(TimeoutTrigger(0))  # pre-triggered
         try:
             with fence:
                 async with asyncio.TaskGroup() as tg:
                     tg.create_task(failing())
         finally:
+            fence_suppressed = fence.suppressed
             fence_cancelled = fence.cancelled
 
     task = asyncio.get_running_loop().create_task(fenced_body())
@@ -264,6 +284,7 @@ async def test__fence__when_trigger_and_child_fail_simultaneously__then_excgroup
         await task
 
     assert exc_info.group_contains(ValueError)
+    assert fence_suppressed is False  # trigger fired but ExceptionGroup propagated, not suppressed
     assert fence_cancelled is True
 
 
@@ -271,19 +292,24 @@ async def test__fence__when_trigger_and_child_fail_simultaneously__then_excgroup
 
 
 async def test__fence__when_multiple_children_with_fence__then_independent():
-    results: dict[str, bool] = {}
+    suppressed_results: dict[str, bool] = {}
+    cancelled_results: dict[str, bool] = {}
 
     async def child_with_fence(name: str, delay: float):
         fence = Fence(TimeoutTrigger(delay))
         with fence:
             await asyncio.sleep(1)
-        results[name] = fence.cancelled
+        suppressed_results[name] = fence.suppressed
+        cancelled_results[name] = fence.cancelled
 
     async with asyncio.TaskGroup() as tg:
         tg.create_task(child_with_fence("fast", 0.001))
         tg.create_task(child_with_fence("slow", 0.01))
         tg.create_task(child_with_fence("never", 10))
 
-    assert results["fast"] is True
-    assert results["slow"] is True
-    assert results["never"] is False
+    assert suppressed_results["fast"] is True
+    assert cancelled_results["fast"] is True
+    assert suppressed_results["slow"] is True
+    assert cancelled_results["slow"] is True
+    assert suppressed_results["never"] is False
+    assert cancelled_results["never"] is False

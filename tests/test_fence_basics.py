@@ -9,6 +9,7 @@ async def test__fence__when_no_sources_async__then_protocol_intact():
     with Fence() as fence:
         await asyncio.sleep(0)
 
+    assert not fence.suppressed
     assert not fence.cancelled
 
 
@@ -16,6 +17,7 @@ async def test__fence__when_no_sources_sync__then_protocol_intact():
     with Fence() as fence:
         pass
 
+    assert not fence.suppressed
     assert not fence.cancelled
 
 
@@ -28,6 +30,7 @@ async def test__fence__when_zero_timeout__then_body_interrupted_at_await():
         await asyncio.sleep(0)
         reached_after_await = True
 
+    assert fence.suppressed
     assert fence.cancelled
     assert reached_before_await
     assert not reached_after_await
@@ -39,6 +42,7 @@ async def test__fence__when_zero_timeout_sync_body__then_body_completes():
     with Fence(TimeoutTrigger(0)) as fence:
         reached = True
 
+    assert not fence.suppressed
     assert fence.cancelled
     assert reached
 
@@ -48,6 +52,7 @@ async def test__fence__when_body_raises__then_exception_propagates():
         with Fence() as fence:
             raise ValueError("boom")
 
+    assert not fence.suppressed
     assert not fence.cancelled
 
     fence = Fence()

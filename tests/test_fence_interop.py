@@ -27,7 +27,9 @@ async def test__fence__when_sequential__then_allowed():
     with second:
         await asyncio.sleep(1)
 
+    assert first.suppressed
     assert first.cancelled
+    assert second.suppressed
     assert second.cancelled
 
 
@@ -37,6 +39,7 @@ async def test__fence__when_inner_fence_inside_asyncio_timeout__then_both_indepe
             inner = Fence(TimeoutTrigger(0.001))
             with inner:
                 await asyncio.sleep(1)
+            assert inner.suppressed
             assert inner.cancelled
             await asyncio.sleep(1)  # outer timeout fires here
 
@@ -67,15 +70,17 @@ async def test__fence__when_external_cancel__then_propagates():
 
 
 async def test__fence__when_external_and_trigger_both_fire__then_external_propagates():
+    fence_suppressed = None
     fence_cancelled = None
 
     async def task_body():
-        nonlocal fence_cancelled
+        nonlocal fence_suppressed, fence_cancelled
         fence = Fence(TimeoutTrigger(0))
         try:
             with fence:
                 await asyncio.sleep(10)
         finally:
+            fence_suppressed = fence.suppressed
             fence_cancelled = fence.cancelled
 
     task = asyncio.get_running_loop().create_task(task_body())
@@ -86,22 +91,25 @@ async def test__fence__when_external_and_trigger_both_fire__then_external_propag
 
     assert task.cancelled()
     assert task.cancelling() == 1  # fence uncancelled its own, external remains
-    assert fence_cancelled  # fence's trigger also fired
+    assert not fence_suppressed  # trigger fired but fence didn't suppress (external cancel won)
+    assert fence_cancelled  # trigger did fire
 
 
 async def test__fence__when_external_cancel_with_fence__then_propagates():
     event = asyncio.Event()  # never fires
+    fence_suppressed = None
     fence_cancelled = None
     reached_after_fence = False
 
     async def task_body():
-        nonlocal reached_after_fence, fence_cancelled
+        nonlocal reached_after_fence, fence_suppressed, fence_cancelled
         fence = Fence(EventTrigger(event))
         try:
             with fence:
                 await asyncio.sleep(10)
             reached_after_fence = True
         finally:
+            fence_suppressed = fence.suppressed
             fence_cancelled = fence.cancelled
 
     task = asyncio.get_running_loop().create_task(task_body())
@@ -112,6 +120,7 @@ async def test__fence__when_external_cancel_with_fence__then_propagates():
         await task
 
     assert not reached_after_fence
+    assert not fence_suppressed
     assert not fence_cancelled
     assert task.cancelled()
     assert task.cancelling() == 1
@@ -150,6 +159,7 @@ async def test__fence__when_child_task_cancelled_inside_body__then_fence_unaffec
             child.cancel()
             await child
 
+    assert not fence.suppressed
     assert not fence.cancelled
     assert task.cancelling() == 0
 
@@ -165,6 +175,7 @@ async def test__fence__when_asyncio_timeout_nested_inside__then_timeout_raises()
             async with asyncio.timeout(0.001):
                 await asyncio.sleep(10)
 
+    assert not fence.suppressed
     assert not fence.cancelled
 
 
@@ -176,6 +187,7 @@ async def test__fence__when_asyncio_timeout_zero_nested_inside__then_timeout_rai
             async with asyncio.timeout(0):
                 await asyncio.sleep(10)
 
+    assert not fence.suppressed
     assert not fence.cancelled
 
 
@@ -186,14 +198,16 @@ async def test__fence__when_nested_inside_asyncio_timeout__then_timeout_propagat
                 await asyncio.sleep(10)
             await asyncio.sleep(10)  # outer timeout fires here
 
+    assert fence.suppressed
     assert fence.cancelled
 
 
 async def test__fence__when_prior_uncancel_cycle__then_counter_survives():
+    fence_suppressed = None
     fence_cancelled = None
 
     async def run():
-        nonlocal fence_cancelled
+        nonlocal fence_suppressed, fence_cancelled
         task = asyncio.current_task()
 
         try:
@@ -204,6 +218,7 @@ async def test__fence__when_prior_uncancel_cycle__then_counter_survives():
         with Fence(TimeoutTrigger(0)) as fence:
             await asyncio.sleep(10)
 
+        fence_suppressed = fence.suppressed
         fence_cancelled = fence.cancelled
         assert task.cancelling() == 0
 
@@ -212,4 +227,5 @@ async def test__fence__when_prior_uncancel_cycle__then_counter_survives():
     inner.cancel()
     await inner
 
+    assert fence_suppressed
     assert fence_cancelled
