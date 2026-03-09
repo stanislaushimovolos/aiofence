@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator
 
-from aiofence import Fencing, bind_fencing_defaults, get_fencing_defaults
+from aiofence import Fencing, bind_fencing, get_current_fencing
 from aiofence.contrib.starlette import disconnect_event, disconnect_fencing
 
 
@@ -112,7 +112,7 @@ async def test__disconnect_fencing__when_outer_fencing__then_inherits() -> None:
     event = asyncio.Event()
     event.set()
 
-    with bind_fencing_defaults(Fencing().event(event, code="shutdown")):
+    with bind_fencing(Fencing().event(event, code="shutdown")):
         async for fencing in _use_dependency(request):
             with fencing.move_on_cancel() as fence:
                 await asyncio.sleep(10)
@@ -136,14 +136,14 @@ async def test__disconnect_fencing__when_custom_code__then_uses_it() -> None:
         assert not fence.cancelled_by("disconnect")
 
 
-# --- get_fencing_defaults() composition ---
+# --- get_current_fencing() composition ---
 
 
 async def test__disconnect_fencing__when_defaults_with_timeout_fires__then_timeout_wins() -> None:
     request = MockRequest()
 
     async for _ in _use_dependency(request):
-        with get_fencing_defaults().timeout(0, code="budget").move_on_cancel() as fence:
+        with get_current_fencing().timeout(0, code="budget").move_on_cancel() as fence:
             await asyncio.sleep(10)
 
         assert fence.cancelled
@@ -157,7 +157,7 @@ async def test__disconnect_fencing__when_defaults_with_disconnect_fires__then_di
     request = MockRequest()
 
     async for _ in _use_dependency(request):
-        with get_fencing_defaults().timeout(10, code="budget").move_on_cancel() as fence:
+        with get_current_fencing().timeout(10, code="budget").move_on_cancel() as fence:
             request.disconnect()
             await asyncio.sleep(10)
 

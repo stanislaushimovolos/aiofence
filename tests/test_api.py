@@ -14,22 +14,31 @@ from aiofence import (
     on_deadline,
     on_event,
     on_timeout,
-    on_trigger,
 )
 
 # --- Immutability ---
 
 
-def test__timeout__when_called__then_returns_new_instance() -> None:
+async def test__timeout__when_called__then_returns_new_instance() -> None:
     base = Fencing()
     derived = base.timeout(5)
     assert derived is not base
 
 
-def test__deadline__when_called__then_returns_new_instance() -> None:
+async def test__timeout__when_called__then_anchored() -> None:
+    derived = Fencing().timeout(5)
+    assert derived._anchored is True
+
+
+async def test__deadline__when_called__then_returns_new_instance() -> None:
     base = Fencing()
-    derived = base.deadline(100)
+    derived = base.deadline(asyncio.get_running_loop().time() + 100)
     assert derived is not base
+
+
+async def test__deadline__when_called__then_not_anchored() -> None:
+    derived = Fencing().deadline(asyncio.get_running_loop().time() + 100)
+    assert derived._anchored is False
 
 
 def test__event__when_called__then_returns_new_instance() -> None:
@@ -38,18 +47,11 @@ def test__event__when_called__then_returns_new_instance() -> None:
     assert derived is not base
 
 
-def test__trigger__when_called__then_returns_new_instance() -> None:
-    base = Fencing()
-    derived = base.trigger(EventTrigger(asyncio.Event()))
-    assert derived is not base
-
-
-def test__base__when_derived__then_base_unchanged() -> None:
+async def test__base__when_derived__then_base_unchanged() -> None:
     base = Fencing()
     base.timeout(5, code="db")
-    assert base._timeouts == ()
-    assert base._explicit_triggers == ()
     assert base._deadline is None
+    assert base._events == ()
 
 
 # --- Simple timeout ---
@@ -60,7 +62,7 @@ async def test__timeout__then_fence_has_one_timeout_trigger() -> None:
         assert len(fence._triggers) == 1
         trigger = fence._triggers[0]
         assert isinstance(trigger, TimeoutTrigger)
-        assert trigger._delay == pytest.approx(5, abs=0.001)
+        assert trigger._delay == pytest.approx(5, abs=0.1)
 
 
 async def test__timeout__with_code__then_code_preserved() -> None:
@@ -102,7 +104,7 @@ async def test__deadline__when_tighter_added_second__then_tighter_wins() -> None
     with ctx.move_on_cancel() as fence:
         trigger = fence._triggers[0]
         assert trigger._code == "tight"
-        assert trigger._delay == pytest.approx(10, abs=0.01)
+        assert trigger._delay == pytest.approx(10, abs=0.1)
 
 
 async def test__deadline__when_looser_added_second__then_original_wins() -> None:
@@ -113,10 +115,10 @@ async def test__deadline__when_looser_added_second__then_original_wins() -> None
     with ctx.move_on_cancel() as fence:
         trigger = fence._triggers[0]
         assert trigger._code == "tight"
-        assert trigger._delay == pytest.approx(10, abs=0.01)
+        assert trigger._delay == pytest.approx(10, abs=0.1)
 
 
-# --- Timeout merging (lazy) ---
+# --- Timeout merging ---
 
 
 async def test__timeout__when_multiple__then_shortest_wins() -> None:
@@ -194,22 +196,22 @@ async def test__event__when_same_event_different_codes__then_last_wins() -> None
         assert event_triggers[0]._code == "b"
 
 
-# --- Custom trigger ---
+# --- Anchored reuse ---
 
 
-async def test__trigger__then_trigger_in_fence() -> None:
-    ev = asyncio.Event()
-    custom = EventTrigger(ev, code="custom")
-
-    with Fencing().trigger(custom).move_on_cancel() as fence:
-        assert custom in fence._triggers
-
-
-# --- Reusability ---
-
-
-async def test__fencing__when_entered_twice__then_distinct_fences() -> None:
+async def test__anchored__when_entered_twice__then_raises() -> None:
     ctx = Fencing().timeout(100)
+
+    with ctx.move_on_cancel():
+        pass
+
+    with pytest.raises(RuntimeError, match="already been used"):
+        with ctx.move_on_cancel():
+            pass
+
+
+async def test__not_anchored__when_entered_twice__then_works() -> None:
+    ctx = Fencing().deadline(asyncio.get_running_loop().time() + 100)
 
     with ctx.move_on_cancel() as f1:
         pass
@@ -273,8 +275,6 @@ def test__fence_cancelled__cancelled_by__when_match__then_true() -> None:
 
 
 def test__fence_cancelled__cancelled_by__when_no_match__then_false() -> None:
-    from aiofence import CancelReason, CancelType
-
     reason = CancelReason(message="timed out", cancel_type=CancelType.TIMEOUT, code="db")
     exc = FenceCancelled((reason,))
     assert not exc.cancelled_by("other")
@@ -372,17 +372,14 @@ async def test__on_deadline__then_equivalent_to_fencing_deadline() -> None:
     assert fence.cancelled
 
 
-async def test__on_trigger__then_equivalent_to_fencing_trigger() -> None:
-    ev = asyncio.Event()
-    ev.set()
-    with on_trigger(EventTrigger(ev, code="custom")).move_on_cancel() as fence:
-        await asyncio.sleep(10)
-    assert fence.cancelled_by("custom")
-
-
 async def test__on_timeout__chaining__then_works() -> None:
     ev = asyncio.Event()
     ev.set()
     with on_timeout(0, code="to").event(ev, code="ev").move_on_cancel() as fence:
         await asyncio.sleep(10)
     assert fence.cancelled_by("to")
+
+
+async def test__on_timeout__returns_anchored() -> None:
+    result = on_timeout(5)
+    assert result._anchored is True

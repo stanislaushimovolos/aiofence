@@ -2,12 +2,11 @@ from .__version__ import __version__
 from .api import (
     FenceCancelled,
     Fencing,
-    bind_fencing_defaults,
-    get_fencing_defaults,
+    bind_fencing,
+    get_current_fencing,
     on_deadline,
     on_event,
     on_timeout,
-    on_trigger,
 )
 from .core import (
     CancelReason,
@@ -36,10 +35,9 @@ __all__ = [
     "Trigger",
     "TriggerHandle",
     "__version__",
-    "bind_fencing_defaults",
-    "get_fencing_defaults",
+    "bind_fencing",
+    "get_current_fencing",
     "on_deadline",
     "on_event",
     "on_timeout",
-    "on_trigger",
 ]

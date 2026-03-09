@@ -37,7 +37,6 @@ Use the factory functions — each returns a `Fencing` builder:
 | `on_timeout(delay, *, code=None)` | Relative timeout in seconds |
 | `on_deadline(when, *, code=None)` | Absolute monotonic time (`loop.time()` based) |
 | `on_event(event, *, code=None)` | Cancel when `asyncio.Event` is set |
-| `on_trigger(trigger)` | Custom `Trigger` instance |
 
 The `code` parameter is an optional machine-readable identifier. Use it to distinguish which trigger fired via `fence.cancelled_by(code)`. Works well with `StrEnum` for type safety.
 
@@ -62,7 +61,6 @@ Available builder methods:
 | `.timeout(delay, *, code=None)` | Add a relative timeout |
 | `.deadline(when, *, code=None)` | Add an absolute deadline (`loop.time()` based) |
 | `.event(event, *, code=None)` | Add an event condition |
-| `.trigger(trigger)` | Add a custom trigger |
 
 ### Timeout / Deadline Merging
 
@@ -70,13 +68,15 @@ Time-based conditions are merged — the tightest constraint wins:
 
 ```python
 ctx = on_timeout(30).timeout(5, code="db")
-# At entry: 30s vs 5s → 5s wins, code="db"
+# 30s vs 5s → 5s wins, code="db"
 
 ctx = on_deadline(T + 20, code="sla").timeout(5, code="db")
-# At entry: T+20 vs now+5 → minimum wins
+# T+20 vs now+5 → minimum wins
 ```
 
-Events and custom triggers are never merged — all arm independently.
+`.timeout()` eagerly resolves to an absolute deadline, making the `Fencing` **one-shot** (raises on reuse). Use `.deadline()` for reusable configs.
+
+Events are never merged — all arm independently.
 
 ## Entering the Fence
 
@@ -159,10 +159,10 @@ elif fence.cancelled_by("shutdown"):
 
 ### Reusing a Fencing
 
-Each `move_on_cancel()` / `raise_on_cancel()` creates a fresh `Fence`:
+`Fencing` builders that use only `.deadline()` and `.event()` are reusable — each `move_on_cancel()` / `raise_on_cancel()` creates a fresh `Fence`:
 
 ```python
-ctx = on_timeout(5)
+ctx = on_deadline(loop.time() + 30)
 
 with ctx.move_on_cancel() as f1:
     await op_a()
@@ -171,13 +171,14 @@ with ctx.move_on_cancel() as f2:
     await op_b()
 ```
 
+**Note:** `.timeout()` anchors the builder to a point in time, making it one-shot. Reusing an anchored `Fencing` raises `RuntimeError`. Call `.timeout()` fresh each time instead.
+
 ### Multiple triggers
 
 ```python
 with (
     on_timeout(30, code="timeout")
     .event(shutdown, code="shutdown")
-    .trigger(CircuitBreakerTrigger(breaker))
     .move_on_cancel()
 ) as fence:
     await call_external()
@@ -186,39 +187,37 @@ if fence.cancelled_by("timeout"):
     log("slow response")
 elif fence.cancelled_by("shutdown"):
     log("shutting down")
-elif fence.cancelled:
-    log("circuit breaker tripped")
 ```
 
 ## Context Propagation
 
-`bind_fencing_defaults()` stores a `Fencing` in a `ContextVar`, so inner code can access it via `get_fencing_defaults()` without passing it through every call signature.
+`bind_fencing()` stores a `Fencing` in a `ContextVar`, so inner code can access it via `get_current_fencing()` without passing it through every call signature.
 
 ```python
-from aiofence import Fencing, bind_fencing_defaults, get_fencing_defaults, on_event
+from aiofence import Fencing, bind_fencing, get_current_fencing, on_event
 
 # Boundary: declare the rules
 fencing = on_event(disconnect, code="disconnect").timeout(30)
-with bind_fencing_defaults(fencing):
+with bind_fencing(fencing):
     await handle_request()
 
 # Deep inside: read and use
 async def process():
-    with get_fencing_defaults().move_on_cancel() as fence:
+    with get_current_fencing().move_on_cancel() as fence:
         await do_work()
 
 # Or extend with local concerns:
 async def process_with_extra():
-    with get_fencing_defaults().event(other_event).move_on_cancel() as fence:
+    with get_current_fencing().event(other_event).move_on_cancel() as fence:
         await do_work()
 ```
 
 ### Semantics
 
-- **`bind_fencing_defaults()` only stores config** — it does not create a Fence. `move_on_cancel()` / `raise_on_cancel()` materialize Fences from it.
-- **Token-based set/reset** — nesting works naturally. Inner `bind_fencing_defaults()` overrides, outer is restored on exit.
+- **`bind_fencing()` only stores config** — it does not create a Fence. `move_on_cancel()` / `raise_on_cancel()` materialize Fences from it.
+- **Token-based set/reset** — nesting works naturally. Inner `bind_fencing()` overrides, outer is restored on exit.
 - **Task inheritance** — `asyncio.create_task()` copies the `ContextVar` automatically. Child tasks inherit the boundary's config without affecting the parent.
-- **`get_fencing_defaults()` with no context** — returns an empty `Fencing()`, so chaining always works: `get_fencing_defaults().timeout(5)`.
+- **`get_current_fencing()` with no context** — returns an empty `Fencing()`, so chaining always works: `get_current_fencing().timeout(5)`.
 
 ## Low-Level API: Fence
 
@@ -256,8 +255,8 @@ async def handler(fencing: Fencing = Depends(disconnect_fencing)):
 `disconnect_fencing` does three things:
 
 1. Creates an `asyncio.Event` that fires on `http.disconnect`
-2. Adds it to `get_fencing_defaults()` with `code="disconnect"` (or a custom code)
-3. Binds the result as the active `Fencing` context via `bind_fencing_defaults()`
+2. Adds it to `get_current_fencing()` with `code="disconnect"` (or a custom code)
+3. Binds the result as the active `Fencing` context via `bind_fencing()`
 
 ### Composing with other triggers
 
@@ -275,7 +274,7 @@ async def handler(fencing: Fencing = Depends(disconnect_fencing)):
         return Response(status_code=499)
 ```
 
-Inner code can also access the disconnect trigger via `get_fencing_defaults()`:
+Inner code can also access the disconnect trigger via `get_current_fencing()`:
 
 ```python
 @app.get("/work")
@@ -283,7 +282,7 @@ async def handler(fencing: Fencing = Depends(disconnect_fencing)):
     await process()
 
 async def process():
-    with get_fencing_defaults().move_on_cancel() as fence:
+    with get_current_fencing().move_on_cancel() as fence:
         await do_work()  # cancelled if client disconnects
 ```
 

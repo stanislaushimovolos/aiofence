@@ -4,14 +4,21 @@ import asyncio
 from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any
 
 from .core import CancelReason, Fence, Trigger
 from .triggers import EventTrigger, TimeoutTrigger
 
-_fencing_defaults: ContextVar[Fencing | None] = ContextVar("fencing_defaults", default=None)
+_current_fencing: ContextVar[Fencing | None] = ContextVar("current_fencing", default=None)
 
 _UNSET: Any = object()
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class _EventEntry:
+    event: asyncio.Event
+    code: str | None = None
 
 
 class FenceCancelled(Exception):  # noqa: N818
@@ -36,34 +43,43 @@ class Fencing:
     """
     Immutable builder that accumulates cancellation conditions
     and materializes them into a Fence.
+
+    Calling ``.timeout()`` anchors the builder to a point in time,
+    making it one-shot (raises on reuse).
     """
 
-    __slots__ = ("_deadline", "_deadline_code", "_explicit_triggers", "_timeouts")
+    __slots__ = ("_anchored", "_deadline", "_deadline_code", "_events", "_used")
 
     def __init__(
         self,
         *,
         _deadline: float | None = None,
         _deadline_code: str | None = None,
-        _timeouts: tuple[tuple[float, str | None], ...] = (),
-        _explicit_triggers: tuple[Trigger, ...] = (),
+        _events: tuple[_EventEntry, ...] = (),
+        _anchored: bool = False,
     ) -> None:
+        self._events = _events
         self._deadline = _deadline
         self._deadline_code = _deadline_code
-        self._timeouts = _timeouts
-        self._explicit_triggers = _explicit_triggers
+        self._anchored = _anchored
+        self._used = False
 
     def timeout(self, delay: float, *, code: str | None = None) -> Fencing:
         """
-        Add a relative timeout. Resolved to a deadline at __enter__ time.
-        Multiple timeouts are merged — the shortest wins.
+        Add a relative timeout. Eagerly resolves to an absolute deadline.
+        Makes the Fencing one-shot (raises on reuse).
 
         Args:
             delay: Seconds until cancellation.
             code: Machine-readable identifier for programmatic matching
                   via ``fence.cancelled_by(code)``.
         """
-        return self._derive(_timeouts=(*self._timeouts, (delay, code)))
+        loop = asyncio.get_running_loop()
+        when = loop.time() + delay
+        if self._deadline is None or when <= self._deadline:
+            return self._derive(_anchored=True, _deadline=when, _deadline_code=code)
+
+        return self._derive(_anchored=True)
 
     def deadline(self, when: float, *, code: str | None = None) -> Fencing:
         """
@@ -76,7 +92,8 @@ class Fencing:
         """
         if self._deadline is None or when <= self._deadline:
             return self._derive(_deadline=when, _deadline_code=code)
-        return self._derive()
+
+        return self
 
     def event(self, event: asyncio.Event, *, code: str | None = None) -> Fencing:
         """
@@ -88,29 +105,9 @@ class Fencing:
             code: Machine-readable identifier for programmatic matching
                   via ``fence.cancelled_by(code)``.
         """
-        # checking if event was already registered
-        existing = None
-        for t in self._explicit_triggers:
-            if isinstance(t, EventTrigger) and t._event is event:
-                existing = t
-                break
-
-        new_trigger = EventTrigger(event, code=code)
-        if existing is None:
-            return self._derive(_triggers=(*self._explicit_triggers, new_trigger))
-
-        # override existing trigger with new code
-        triggers = tuple(new_trigger if t is existing else t for t in self._explicit_triggers)
-        return self._derive(_triggers=triggers)
-
-    def trigger(self, trigger: Trigger) -> Fencing:
-        """
-        Add a custom trigger. Custom triggers are never merged or deduplicated.
-
-        Args:
-            trigger: A Trigger instance to arm when the Fence is entered.
-        """
-        return self._derive(_triggers=(*self._explicit_triggers, trigger))
+        new_entry = _EventEntry(code=code, event=event)
+        existing = tuple(e for e in self._events if e.event is not event)
+        return self._derive(_events=(new_entry, *existing))
 
     @contextmanager
     def raise_on_cancel(self) -> Generator[Fence]:
@@ -120,6 +117,7 @@ class Fencing:
         fence = self._build_fence()
         with fence:
             yield fence
+
         if fence.cancelled:
             raise FenceCancelled(fence.reasons)
 
@@ -143,25 +141,21 @@ class Fencing:
             yield fence
 
     def _build_fence(self) -> Fence:
-        loop = asyncio.get_running_loop()
-        now = loop.time()
-
-        effective_deadline = self._deadline
-        effective_code = self._deadline_code
-
-        # choose the tightest deadline condition
-        for delay, code in self._timeouts:
-            dl = now + delay
-            if effective_deadline is None or dl < effective_deadline:
-                effective_deadline = dl
-                effective_code = code
+        if self._anchored:
+            if self._used:
+                raise RuntimeError(
+                    "This Fencing has already been used. "
+                    "Call .timeout() on the original Fencing to create a fresh anchor."
+                )
+            self._used = True
 
         triggers: list[Trigger] = []
-        if effective_deadline is not None:
-            remaining = max(0.0, effective_deadline - now)
-            triggers.append(TimeoutTrigger(remaining, code=effective_code))
+        if self._deadline is not None:
+            loop = asyncio.get_running_loop()
+            remaining = max(0.0, self._deadline - loop.time())
+            triggers.append(TimeoutTrigger(delay=remaining, code=self._deadline_code))
 
-        triggers.extend(self._explicit_triggers)
+        triggers.extend(EventTrigger(event=e.event, code=e.code) for e in self._events)
         return Fence(*triggers)
 
     def _derive(
@@ -169,20 +163,20 @@ class Fencing:
         *,
         _deadline: float | None = _UNSET,
         _deadline_code: str | None = _UNSET,
-        _timeouts: tuple[tuple[float, str | None], ...] = _UNSET,
-        _triggers: tuple[Trigger, ...] = _UNSET,
+        _events: tuple[_EventEntry, ...] = _UNSET,
+        _anchored: bool = _UNSET,
     ) -> Fencing:
         return Fencing(
             _deadline=self._deadline if _deadline is _UNSET else _deadline,
             _deadline_code=self._deadline_code if _deadline_code is _UNSET else _deadline_code,
-            _timeouts=self._timeouts if _timeouts is _UNSET else _timeouts,
-            _explicit_triggers=self._explicit_triggers if _triggers is _UNSET else _triggers,
+            _events=self._events if _events is _UNSET else _events,
+            _anchored=self._anchored if _anchored is _UNSET else _anchored,
         )
 
 
 def on_timeout(delay: float, *, code: str | None = None) -> Fencing:
     """
-    Create a Fencing with a relative timeout.
+    Create a Fencing with a relative timeout (anchored, one-shot).
 
     Args:
         delay: Seconds until cancellation.
@@ -216,32 +210,22 @@ def on_event(event: asyncio.Event, *, code: str | None = None) -> Fencing:
     return Fencing().event(event, code=code)
 
 
-def on_trigger(trigger: Trigger) -> Fencing:
+def get_current_fencing() -> Fencing:
     """
-    Create a Fencing with a custom trigger.
-
-    Args:
-        trigger: A Trigger instance to arm when the Fence is entered.
-    """
-    return Fencing().trigger(trigger)
-
-
-def get_fencing_defaults() -> Fencing:
-    """
-    Return the Fencing defaults from the current context, or an empty
+    Return the current Fencing from context, or an empty
     Fencing if none is bound.
     """
-    return _fencing_defaults.get() or Fencing()
+    return _current_fencing.get() or Fencing()
 
 
 @contextmanager
-def bind_fencing_defaults(fencing: Fencing) -> Generator[None, None, None]:
+def bind_fencing(fencing: Fencing) -> Generator[None, None, None]:
     """
-    Set the given Fencing as the defaults for the current context.
-    Inner code can read it with ``get_fencing_defaults()``.
+    Set the given Fencing as current for this context.
+    Inner code can read it with ``get_current_fencing()``.
     """
-    token = _fencing_defaults.set(fencing)
+    token = _current_fencing.set(fencing)
     try:
         yield
     finally:
-        _fencing_defaults.reset(token)
+        _current_fencing.reset(token)
