@@ -240,7 +240,7 @@ async def test__timeout_and_event__then_both_in_fence() -> None:
 
 async def test__move_on_cancel__when_pre_triggered__then_triggered_before_await() -> None:
     with Fencing().timeout(0).move_on_cancel() as fence:
-        assert fence.triggered
+        assert fence.cancelled
 
 
 # --- Empty Fencing ---
@@ -249,7 +249,7 @@ async def test__move_on_cancel__when_pre_triggered__then_triggered_before_await(
 async def test__empty__when_no_conditions__then_fence_has_no_triggers() -> None:
     with Fencing().move_on_cancel() as fence:
         assert fence._triggers == ()
-        assert not fence.cancelled
+        assert not fence.suppressed
 
 
 # --- FenceCancelled ---
@@ -257,46 +257,46 @@ async def test__empty__when_no_conditions__then_fence_has_no_triggers() -> None:
 
 def test__fence_cancelled__when_single_reason__then_str_is_message() -> None:
     reason = CancelReason(message="timed out after 5s", cancel_type=CancelType.TIMEOUT, code="db")
-    exc = FenceCancelled((reason,), cancelled=True)
+    exc = FenceCancelled((reason,), suppressed=True)
     assert str(exc) == "timed out after 5s"
 
 
 def test__fence_cancelled__when_multiple_reasons__then_str_joins() -> None:
     r1 = CancelReason(message="timed out after 5s", cancel_type=CancelType.TIMEOUT, code="db")
     r2 = CancelReason(message="event set", cancel_type=CancelType.EVENT, code="shutdown")
-    exc = FenceCancelled((r1, r2), cancelled=True)
+    exc = FenceCancelled((r1, r2), suppressed=True)
     assert str(exc) == "timed out after 5s; event set"
 
 
 def test__fence_cancelled__cancelled_by__when_match__then_true() -> None:
     reason = CancelReason(message="timed out", cancel_type=CancelType.TIMEOUT, code="db")
-    exc = FenceCancelled((reason,), cancelled=True)
+    exc = FenceCancelled((reason,), suppressed=True)
     assert exc.cancelled_by("db")
 
 
 def test__fence_cancelled__cancelled_by__when_no_match__then_false() -> None:
     reason = CancelReason(message="timed out", cancel_type=CancelType.TIMEOUT, code="db")
-    exc = FenceCancelled((reason,), cancelled=True)
+    exc = FenceCancelled((reason,), suppressed=True)
     assert not exc.cancelled_by("other")
 
 
 def test__fence_cancelled__is_exception__not_cancelled_error() -> None:
-    exc = FenceCancelled((), cancelled=False)
+    exc = FenceCancelled((), suppressed=False)
     assert isinstance(exc, Exception)
     assert not isinstance(exc, asyncio.CancelledError)
 
 
-def test__fence_cancelled__has_cancel_reasons_and_cancelled() -> None:
+def test__fence_cancelled__has_cancel_reasons_and_suppressed() -> None:
     reason = CancelReason(message="timed out", cancel_type=CancelType.TIMEOUT, code="db")
-    exc = FenceCancelled((reason,), cancelled=True)
+    exc = FenceCancelled((reason,), suppressed=True)
     assert exc.cancel_reasons == (reason,)
-    assert exc.cancelled is True
+    assert exc.suppressed is True
 
 
-def test__fence_cancelled__when_not_cancelled__then_cancelled_is_false() -> None:
+def test__fence_cancelled__when_not_suppressed__then_suppressed_is_false() -> None:
     reason = CancelReason(message="timed out", cancel_type=CancelType.TIMEOUT)
-    exc = FenceCancelled((reason,), cancelled=False)
-    assert exc.cancelled is False
+    exc = FenceCancelled((reason,), suppressed=False)
+    assert exc.suppressed is False
     assert len(exc.cancel_reasons) == 1
 
 
@@ -312,7 +312,7 @@ async def test__raise_on_cancel__when_timeout_fires__then_raises() -> None:
 async def test__raise_on_cancel__when_no_cancel__then_no_exception() -> None:
     with Fencing().timeout(100).raise_on_cancel() as fence:
         pass
-    assert not fence.cancelled
+    assert not fence.suppressed
 
 
 async def test__raise_on_cancel__when_raised__then_has_reasons() -> None:
@@ -353,7 +353,7 @@ async def test__raise_on_cancel__when_pre_triggered__then_raises() -> None:
 async def test__raise_on_cancel__when_empty__then_no_exception() -> None:
     with Fencing().raise_on_cancel() as fence:
         pass
-    assert not fence.cancelled
+    assert not fence.suppressed
 
 
 async def test__raise_on_cancel__when_pretriggered_sync_body__then_still_raises() -> None:
@@ -364,37 +364,37 @@ async def test__raise_on_cancel__when_pretriggered_sync_body__then_still_raises(
         with Fencing().event(ev).raise_on_cancel():
             x = 1 + 1  # noqa: F841
 
-    assert exc_info.value.cancelled is False
+    assert exc_info.value.suppressed is False
 
 
-async def test__raise_on_cancel__when_raised__then_has_cancel_reasons_and_cancelled() -> None:
+async def test__raise_on_cancel__when_raised__then_has_cancel_reasons_and_suppressed() -> None:
     with pytest.raises(FenceCancelled) as exc_info:
         with Fencing().timeout(0, code="db").raise_on_cancel():
             await asyncio.sleep(10)
 
     assert len(exc_info.value.cancel_reasons) == 1
     assert exc_info.value.cancel_reasons[0].code == "db"
-    assert exc_info.value.cancelled is True
+    assert exc_info.value.suppressed is True
 
 
 # --- move_on_cancel ---
 
 
-async def test__move_on_cancel__when_pretriggered_sync_body__then_not_cancelled() -> None:
+async def test__move_on_cancel__when_pretriggered_sync_body__then_not_suppressed() -> None:
     ev = asyncio.Event()
     ev.set()
 
     with Fencing().event(ev).move_on_cancel() as fence:
         x = 1 + 1  # noqa: F841
 
-    assert fence.cancelled is False
-    assert fence.triggered is True
+    assert fence.suppressed is False
+    assert fence.cancelled is True
     assert len(fence.cancel_reasons) == 1
 
 
-async def test__move_on_cancel__when_pretriggered__then_triggered_visible_in_body() -> None:
+async def test__move_on_cancel__when_pretriggered__then_cancelled_visible_in_body() -> None:
     with Fencing().timeout(0).move_on_cancel() as fence:
-        result = "early_exit" if fence.triggered else "normal"
+        result = "early_exit" if fence.cancelled else "normal"
 
     assert result == "early_exit"
 
@@ -405,7 +405,7 @@ async def test__move_on_cancel__when_pretriggered__then_triggered_visible_in_bod
 async def test__on_timeout__then_equivalent_to_fencing_timeout() -> None:
     with on_timeout(0).move_on_cancel() as fence:
         await asyncio.sleep(10)
-    assert fence.cancelled
+    assert fence.suppressed
 
 
 async def test__on_timeout__with_code__then_code_preserved() -> None:
@@ -426,7 +426,7 @@ async def test__on_deadline__then_equivalent_to_fencing_deadline() -> None:
     loop = asyncio.get_running_loop()
     with on_deadline(loop.time()).move_on_cancel() as fence:
         await asyncio.sleep(10)
-    assert fence.cancelled
+    assert fence.suppressed
 
 
 async def test__on_timeout__chaining__then_works() -> None:

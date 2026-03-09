@@ -69,7 +69,7 @@ class Fence:
 
     Suppression semantics (follows anyio CancelScope model):
     __exit__ always suppresses CancelledError — never raises, never
-    propagates. Caller inspects `fence.cancelled` / `fence.cancel_reasons` after
+    propagates. Caller inspects `fence.suppressed` / `fence.cancel_reasons` after
     the block. This keeps the cancel counter balanced and avoids
     CancelledError-with-counter-zero, which would confuse TaskGroup
     and nested asyncio.timeout scopes.
@@ -84,19 +84,19 @@ class Fence:
         self._cancelling: int | None = None
         self._armed = False
         self._exited = False
-        self._cancelled = False
+        self._suppressed = False
 
     @property
-    def cancelled(self) -> bool:
+    def suppressed(self) -> bool:
         """
         True if the Fence caught and suppressed a CancelledError.
         False if no trigger fired, or if the trigger fired but the body
         completed before cancellation was delivered.
         """
-        return self._cancelled
+        return self._suppressed
 
     @property
-    def triggered(self) -> bool:
+    def cancelled(self) -> bool:
         """
         True if any trigger fired, even if the body completed
         before cancellation was delivered.
@@ -159,8 +159,8 @@ class Fence:
             if self._cancel_token is None:
                 return False
 
-            self._cancelled = self._cancel_token.resolve(exc_type)
-            return self._cancelled
+            self._suppressed = self._cancel_token.resolve(exc_type)
+            return self._suppressed
         finally:
             if self._current_task is not None:
                 _active_fences.pop(self._current_task, None)

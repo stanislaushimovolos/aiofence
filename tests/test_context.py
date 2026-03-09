@@ -36,7 +36,7 @@ async def test__bind_fencing__when_cancelled__then_context_restored() -> None:
         with bind_fencing(Fencing().timeout(0, code="inner")):
             with get_current_fencing().move_on_cancel() as fence:
                 await asyncio.sleep(10)
-            assert fence.cancelled
+            assert fence.suppressed
         assert get_current_fencing() is original
 
 
@@ -98,7 +98,7 @@ async def test__get_current_fencing__move_on_cancel__when_timeout_fires__then_ca
     with bind_fencing(Fencing().timeout(0, code="ctx")):
         with get_current_fencing().move_on_cancel() as fence:
             await asyncio.sleep(10)
-        assert fence.cancelled
+        assert fence.suppressed
         assert fence.cancelled_by("ctx")
 
 
@@ -129,7 +129,7 @@ async def test__inherited_event__when_fires__then_cancels_inner_fence() -> None:
         await task
 
     assert result is not None
-    assert result.cancelled
+    assert result.suppressed
     assert result.cancelled_by("disconnect")
 
 
@@ -139,5 +139,5 @@ async def test__inherited_event__when_fires__then_cancels_inner_fence() -> None:
 async def test__get_current_fencing__when_no_context__then_chains_normally() -> None:
     with get_current_fencing().timeout(0, code="chained").move_on_cancel() as fence:
         await asyncio.sleep(10)
-    assert fence.cancelled
+    assert fence.suppressed
     assert fence.cancelled_by("chained")

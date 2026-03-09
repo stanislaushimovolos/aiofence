@@ -113,10 +113,12 @@ After the block, the `Fence` has:
 
 | Property / Method | Type | Description |
 |-------------------|------|-------------|
-| `fence.triggered` | `bool` | `True` if any trigger fired |
-| `fence.cancelled` | `bool` | `True` if `CancelledError` was caught and suppressed |
+| `fence.cancelled` | `bool` | `True` if any trigger fired |
+| `fence.suppressed` | `bool` | `True` if `CancelledError` was caught and suppressed |
 | `fence.cancel_reasons` | `tuple[CancelReason, ...]` | All reasons that fired |
 | `fence.cancelled_by(code)` | `bool` | Did a specific trigger fire? |
+
+Most code should use `cancelled` — it tells you whether a condition was met. `suppressed` differs only when a trigger fires but the body completes synchronously before `CancelledError` is delivered (pre-triggered sync body). In that case `cancelled` is `True` but `suppressed` is `False`.
 
 Each `CancelReason` has:
 

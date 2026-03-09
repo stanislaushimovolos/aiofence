@@ -26,7 +26,7 @@ class FenceCancelled(Exception):  # noqa: N818
     Raised by ``Fencing.raise_on_cancel()`` when a trigger fires.
 
     Attributes:
-        cancelled: True if the Fence caught and suppressed a
+        suppressed: True if the Fence caught and suppressed a
             CancelledError. False if a trigger fired but the body
             completed before cancellation was delivered.
         cancel_reasons: All trigger reasons that fired.
@@ -36,10 +36,10 @@ class FenceCancelled(Exception):  # noqa: N818
         self,
         cancel_reasons: tuple[CancelReason, ...],
         *,
-        cancelled: bool,
+        suppressed: bool,
     ) -> None:
         self.cancel_reasons = cancel_reasons
-        self.cancelled = cancelled
+        self.suppressed = suppressed
         super().__init__(self._format_message())
 
     def cancelled_by(self, code: str) -> bool:
@@ -130,21 +130,21 @@ class Fencing:
         with fence:
             yield fence
 
-        if fence.triggered:
-            raise FenceCancelled(fence.cancel_reasons, cancelled=fence.cancelled)
+        if fence.cancelled:
+            raise FenceCancelled(fence.cancel_reasons, suppressed=fence.suppressed)
 
     @contextmanager
     def move_on_cancel(self) -> Generator[Fence]:
         """
         Context manager that suppresses CancelledError on exit.
-        Caller inspects ``fence.cancelled`` / ``fence.triggered`` after the block.
+        Caller inspects ``fence.suppressed`` / ``fence.cancelled`` after the block.
 
         Unlike ``asyncio.timeout``, cancellation doesn't require waiting
-        for the first ``await``. Check ``fence.triggered`` at the top
+        for the first ``await``. Check ``fence.cancelled`` at the top
         of the body for immediate early exit::
 
             with Fencing().timeout(5).move_on_cancel() as fence:
-                if fence.triggered:
+                if fence.cancelled:
                     return fallback()
                 await work()
         """

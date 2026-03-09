@@ -14,7 +14,7 @@ For usage guide, examples, and custom trigger documentation see [api.md](api.md)
 
 - **`Trigger`** — abstract cancellation condition. `check()` for synchronous pre-check, `arm(callback)` for async monitoring. Returns a `TriggerHandle`.
 - **`TriggerHandle`** — live watch returned by `Trigger.arm()`. `disarm()` stops monitoring.
-- **`Fence`** — sync context manager that arms triggers against the current task. Suppresses `CancelledError` on exit. Caller inspects `fence.cancelled` / `fence.cancel_reasons` after the block.
+- **`Fence`** — sync context manager that arms triggers against the current task. Suppresses `CancelledError` on exit. Caller inspects `fence.suppressed` / `fence.cancel_reasons` after the block.
 - **`_CancelToken`** — internal. Encapsulates one `cancel()`/`uncancel()` cycle. Tracks whether the deferred cancel fired and settles ownership in `__exit__`.
 - **`CancelReason`** — frozen dataclass with `message` and `cancel_type` (TIMEOUT or EVENT).
 
@@ -70,7 +70,7 @@ Suppression is the only approach that preserves worker control and is composable
 
 Python sync context managers cannot skip the body without raising from `__enter__`. If `__enter__` raises, `__exit__` is never called, so counter cleanup can't happen.
 
-Instead, pre-triggered Fences schedule `task.cancel()` via `call_soon` and let the body start. The body is interrupted at the first `await`. If the body has no awaits and completes synchronously, the pending cancel is rescinded — `fence.cancelled` is still `True` (reasons were recorded on entry), but no `CancelledError` is ever delivered.
+Instead, pre-triggered Fences schedule `task.cancel()` via `call_soon` and let the body start. The body is interrupted at the first `await`. If the body has no awaits and completes synchronously, the pending cancel is rescinded — `fence.cancelled` is still `True` (reasons were recorded on entry, so `fence.cancelled` reflects that a trigger fired), but no `CancelledError` is ever delivered.
 
 ### TaskGroup compatibility
 
@@ -89,7 +89,7 @@ Instead, pre-triggered Fences schedule `task.cancel()` via `call_soon` and let t
 ## Design Decisions
 
 - **Sync context manager**: `__enter__`/`__exit__` (not async). Event loop interaction happens via callbacks and `call_soon`, not awaits.
-- **Single mode**: No split between "raise" and "suppress" modes. Fence always suppresses. If the caller wants to raise, they do it themselves after checking `fence.cancelled`.
+- **Single mode**: No split between "raise" and "suppress" modes. Fence always suppresses. If the caller wants to raise, they do it themselves after checking `fence.cancelled` / `fence.suppressed`.
 - **No custom exception types**: No `FenceTimeout` or `FenceCancelled`. Keeps the API surface minimal and avoids `CancelledError` subclass pitfalls.
 - **No scope tree / shielding**: Nesting and shielding handled by asyncio itself (`asyncio.shield()`, `uncancel()` counting).
 - **Deadlines vs timeouts**: Core library works with relative timeouts (`TimeoutTrigger`). Deadlines (absolute time) are an application-layer concern — middleware converts remaining budget to `TimeoutTrigger(remaining)`.
