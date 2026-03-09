@@ -7,7 +7,6 @@ from .api import (
     on_deadline,
     on_event,
     on_timeout,
-    on_trigger,
 )
 from .core import (
     CancelReason,
@@ -41,5 +40,4 @@ __all__ = [
     "on_deadline",
     "on_event",
     "on_timeout",
-    "on_trigger",
 ]

@@ -10,9 +10,8 @@ from aiofence import Fencing, bind_fencing_defaults, get_fencing_defaults
 async def test__get_fencing_defaults__when_no_context__then_returns_empty_fencing() -> None:
     fencing = get_fencing_defaults()
     assert isinstance(fencing, Fencing)
-    assert fencing._timeouts == ()
-    assert fencing._explicit_triggers == ()
     assert fencing._deadline is None
+    assert fencing._events == ()
 
 
 # --- get_fencing_defaults() inside bind_fencing_defaults ---
@@ -28,7 +27,7 @@ async def test__bind_fencing_defaults__when_exited__then_context_restored() -> N
     with bind_fencing_defaults(Fencing().timeout(5)):
         pass
     fencing = get_fencing_defaults()
-    assert fencing._timeouts == ()
+    assert fencing._deadline is None
 
 
 async def test__bind_fencing_defaults__when_cancelled__then_context_restored() -> None:
@@ -88,7 +87,8 @@ async def test__bind_fencing_defaults__when_child_rebinds__then_parent_unaffecte
         assert get_fencing_defaults() is original
 
     assert child_seen is not original
-    assert child_seen._timeouts == ((1, "child"),)
+    assert child_seen._anchored is True
+    assert child_seen._deadline_code == "child"
 
 
 # --- Integration with move_on_cancel ---
