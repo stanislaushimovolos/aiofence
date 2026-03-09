@@ -40,3 +40,4 @@ Examples:
 - If no changes exist, tell the user there's nothing to commit
 - Do NOT push after committing
 - Do NOT add Co-Authored-By or other AI markers
+- **Before committing, check if any docs (README, `docs/`, etc.) reference changed/removed APIs and need updating.** Stale docs are a bug — fix them in the same commit or flag them to the user.

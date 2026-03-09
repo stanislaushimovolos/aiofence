@@ -10,7 +10,7 @@ from typing import Any
 from .core import CancelReason, Fence, Trigger
 from .triggers import EventTrigger, TimeoutTrigger
 
-_fencing_defaults: ContextVar[Fencing | None] = ContextVar("fencing_defaults", default=None)
+_current_fencing: ContextVar[Fencing | None] = ContextVar("current_fencing", default=None)
 
 _UNSET: Any = object()
 
@@ -210,22 +210,22 @@ def on_event(event: asyncio.Event, *, code: str | None = None) -> Fencing:
     return Fencing().event(event, code=code)
 
 
-def get_fencing_defaults() -> Fencing:
+def get_current_fencing() -> Fencing:
     """
-    Return the Fencing defaults from the current context, or an empty
+    Return the current Fencing from context, or an empty
     Fencing if none is bound.
     """
-    return _fencing_defaults.get() or Fencing()
+    return _current_fencing.get() or Fencing()
 
 
 @contextmanager
-def bind_fencing_defaults(fencing: Fencing) -> Generator[None, None, None]:
+def bind_fencing(fencing: Fencing) -> Generator[None, None, None]:
     """
-    Set the given Fencing as the defaults for the current context.
-    Inner code can read it with ``get_fencing_defaults()``.
+    Set the given Fencing as current for this context.
+    Inner code can read it with ``get_current_fencing()``.
     """
-    token = _fencing_defaults.set(fencing)
+    token = _current_fencing.set(fencing)
     try:
         yield
     finally:
-        _fencing_defaults.reset(token)
+        _current_fencing.reset(token)
