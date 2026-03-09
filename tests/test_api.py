@@ -246,10 +246,12 @@ async def test__move_on_cancel__when_pre_triggered__then_triggered_before_await(
 # --- Empty Fencing ---
 
 
-async def test__empty__when_no_conditions__then_fence_has_no_triggers() -> None:
+async def test__empty__when_no_conditions__then_not_cancelled() -> None:
     with Fencing().move_on_cancel() as fence:
-        assert fence._triggers == ()
-        assert not fence.suppressed
+        await asyncio.sleep(0)
+
+    assert not fence.cancelled
+    assert not fence.suppressed
 
 
 # --- FenceCancelled ---
@@ -312,7 +314,9 @@ async def test__raise_on_cancel__when_timeout_fires__then_raises() -> None:
 async def test__raise_on_cancel__when_no_cancel__then_no_exception() -> None:
     with Fencing().timeout(100).raise_on_cancel() as fence:
         pass
+
     assert not fence.suppressed
+    assert not fence.cancelled
 
 
 async def test__raise_on_cancel__when_raised__then_has_reasons() -> None:
@@ -354,6 +358,7 @@ async def test__raise_on_cancel__when_empty__then_no_exception() -> None:
     with Fencing().raise_on_cancel() as fence:
         pass
     assert not fence.suppressed
+    assert not fence.cancelled
 
 
 async def test__raise_on_cancel__when_pretriggered_sync_body__then_still_raises() -> None:
@@ -405,7 +410,9 @@ async def test__move_on_cancel__when_pretriggered__then_cancelled_visible_in_bod
 async def test__on_timeout__then_equivalent_to_fencing_timeout() -> None:
     with on_timeout(0).move_on_cancel() as fence:
         await asyncio.sleep(10)
+
     assert fence.suppressed
+    assert fence.cancelled
 
 
 async def test__on_timeout__with_code__then_code_preserved() -> None:
@@ -426,7 +433,9 @@ async def test__on_deadline__then_equivalent_to_fencing_deadline() -> None:
     loop = asyncio.get_running_loop()
     with on_deadline(loop.time()).move_on_cancel() as fence:
         await asyncio.sleep(10)
+
     assert fence.suppressed
+    assert fence.cancelled
 
 
 async def test__on_timeout__chaining__then_works() -> None:

@@ -28,7 +28,9 @@ async def test__fence__when_sequential__then_allowed():
         await asyncio.sleep(1)
 
     assert first.suppressed
+    assert first.cancelled
     assert second.suppressed
+    assert second.cancelled
 
 
 async def test__fence__when_inner_fence_inside_asyncio_timeout__then_both_independent():
@@ -38,6 +40,7 @@ async def test__fence__when_inner_fence_inside_asyncio_timeout__then_both_indepe
             with inner:
                 await asyncio.sleep(1)
             assert inner.suppressed
+            assert inner.cancelled
             await asyncio.sleep(1)  # outer timeout fires here
 
 
@@ -95,10 +98,11 @@ async def test__fence__when_external_and_trigger_both_fire__then_external_propag
 async def test__fence__when_external_cancel_with_fence__then_propagates():
     event = asyncio.Event()  # never fires
     fence_suppressed = None
+    fence_cancelled = None
     reached_after_fence = False
 
     async def task_body():
-        nonlocal reached_after_fence, fence_suppressed
+        nonlocal reached_after_fence, fence_suppressed, fence_cancelled
         fence = Fence(EventTrigger(event))
         try:
             with fence:
@@ -106,6 +110,7 @@ async def test__fence__when_external_cancel_with_fence__then_propagates():
             reached_after_fence = True
         finally:
             fence_suppressed = fence.suppressed
+            fence_cancelled = fence.cancelled
 
     task = asyncio.get_running_loop().create_task(task_body())
     await asyncio.sleep(0)
@@ -116,6 +121,7 @@ async def test__fence__when_external_cancel_with_fence__then_propagates():
 
     assert not reached_after_fence
     assert not fence_suppressed
+    assert not fence_cancelled
     assert task.cancelled()
     assert task.cancelling() == 1
 
@@ -154,6 +160,7 @@ async def test__fence__when_child_task_cancelled_inside_body__then_fence_unaffec
             await child
 
     assert not fence.suppressed
+    assert not fence.cancelled
     assert task.cancelling() == 0
 
 
@@ -169,6 +176,7 @@ async def test__fence__when_asyncio_timeout_nested_inside__then_timeout_raises()
                 await asyncio.sleep(10)
 
     assert not fence.suppressed
+    assert not fence.cancelled
 
 
 async def test__fence__when_asyncio_timeout_zero_nested_inside__then_timeout_raises():
@@ -180,6 +188,7 @@ async def test__fence__when_asyncio_timeout_zero_nested_inside__then_timeout_rai
                 await asyncio.sleep(10)
 
     assert not fence.suppressed
+    assert not fence.cancelled
 
 
 async def test__fence__when_nested_inside_asyncio_timeout__then_timeout_propagates():
@@ -190,13 +199,15 @@ async def test__fence__when_nested_inside_asyncio_timeout__then_timeout_propagat
             await asyncio.sleep(10)  # outer timeout fires here
 
     assert fence.suppressed
+    assert fence.cancelled
 
 
 async def test__fence__when_prior_uncancel_cycle__then_counter_survives():
     fence_suppressed = None
+    fence_cancelled = None
 
     async def run():
-        nonlocal fence_suppressed
+        nonlocal fence_suppressed, fence_cancelled
         task = asyncio.current_task()
 
         try:
@@ -208,6 +219,7 @@ async def test__fence__when_prior_uncancel_cycle__then_counter_survives():
             await asyncio.sleep(10)
 
         fence_suppressed = fence.suppressed
+        fence_cancelled = fence.cancelled
         assert task.cancelling() == 0
 
     inner = asyncio.get_running_loop().create_task(run())
@@ -216,3 +228,4 @@ async def test__fence__when_prior_uncancel_cycle__then_counter_survives():
     await inner
 
     assert fence_suppressed
+    assert fence_cancelled

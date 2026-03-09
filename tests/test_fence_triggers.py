@@ -13,6 +13,7 @@ async def test__fence__when_timeout_pre_triggered__then_suppressed_with_reasons(
         await asyncio.sleep(1)
 
     assert fence.suppressed
+    assert fence.cancelled
     assert len(fence.cancel_reasons) == 1
     assert fence.cancel_reasons[0].cancel_type is CancelType.TIMEOUT
 
@@ -25,6 +26,7 @@ async def test__fence__when_event_pre_set__then_suppressed_and_cancelled():
         await asyncio.sleep(1)
 
     assert fence.suppressed
+    assert fence.cancelled
     assert fence.cancel_reasons[0].cancel_type is CancelType.EVENT
 
 
@@ -40,6 +42,7 @@ async def test__fence__when_event_pre_set__then_body_interrupted_at_await():
         reached_after_await = True
 
     assert fence.suppressed
+    assert fence.cancelled
     assert reached_before_await
     assert not reached_after_await
 
@@ -120,6 +123,7 @@ async def test__fence__when_event_set_during_body__then_suppressed():
         await asyncio.sleep(1)
 
     assert fence.suppressed
+    assert fence.cancelled
 
 
 async def test__fence__when_timeout_fires__then_suppressed_with_reasons():
@@ -127,6 +131,7 @@ async def test__fence__when_timeout_fires__then_suppressed_with_reasons():
         await asyncio.sleep(1)
 
     assert fence.suppressed
+    assert fence.cancelled
     assert len(fence.cancel_reasons) == 1
     assert fence.cancel_reasons[0].cancel_type is CancelType.TIMEOUT
 
@@ -197,6 +202,7 @@ async def test__fence__when_negative_timeout__then_suppressed():
         await asyncio.sleep(1)
 
     assert fence.suppressed
+    assert fence.cancelled
     assert fence.cancel_reasons[0].cancel_type is CancelType.TIMEOUT
 
 
@@ -220,6 +226,7 @@ async def test__fence__when_event_set_inside_body__then_body_interrupted_at_awai
         reached = True
 
     assert fence.suppressed
+    assert fence.cancelled
     assert not reached
 
 
@@ -231,6 +238,7 @@ async def test__fence__when_event_set_inside_body__then_no_spurious_cancel_after
         await asyncio.sleep(0)  # let callback fire
 
     assert fence.suppressed
+    assert fence.cancelled
     await asyncio.sleep(0)  # no spurious CancelledError after exit
     assert asyncio.current_task().cancelling() == 0
 
@@ -243,6 +251,7 @@ async def test__fence__when_event_has_code__then_reason_carries_code():
         await asyncio.sleep(1)
 
     assert fence.suppressed
+    assert fence.cancelled
     assert fence.cancel_reasons[0].code == "shutdown"
 
 
@@ -251,6 +260,7 @@ async def test__fence__when_timeout_has_code__then_reason_carries_code():
         await asyncio.sleep(1)
 
     assert fence.suppressed
+    assert fence.cancelled
     assert fence.cancel_reasons[0].code == "request_budget"
 
 
@@ -259,6 +269,7 @@ async def test__fence__when_no_code__then_reason_code_is_none():
         await asyncio.sleep(1)
 
     assert fence.suppressed
+    assert fence.cancelled
     assert fence.cancel_reasons[0].code is None
 
 
@@ -306,6 +317,7 @@ async def test__fence__when_multiple_triggers_fire__then_all_reasons_recorded():
         await asyncio.sleep(1)
 
     assert fence.suppressed
+    assert fence.cancelled
     assert len(fence.cancel_reasons) == 2
 
 
@@ -398,6 +410,7 @@ async def test__fence__when_event_reused_sequentially__then_waiters_clean():
         await asyncio.sleep(1)
 
     assert fence1.suppressed
+    assert fence1.cancelled
     assert pending_waiters() == 0
     assert other_fut.done()
 
@@ -413,6 +426,7 @@ async def test__fence__when_event_reused_sequentially__then_waiters_clean():
         await asyncio.sleep(1)
 
     assert fence2.suppressed
+    assert fence2.cancelled
     assert pending_waiters() == 0
     assert other_fut.done()
     assert asyncio.current_task().cancelling() == 0
@@ -436,5 +450,7 @@ async def test__fence__when_two_tasks_share_event__then_both_cancelled_and_waite
     fence1, fence2 = await asyncio.gather(t1, t2)
 
     assert fence1.suppressed
+    assert fence1.cancelled
     assert fence2.suppressed
+    assert fence2.cancelled
     assert len(event._waiters) == 0
