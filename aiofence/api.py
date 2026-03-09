@@ -23,20 +23,32 @@ class _EventEntry:
 
 class FenceCancelled(Exception):  # noqa: N818
     """
-    Raised by ``Fencing.raise_on_cancel()`` when cancellation occurs.
+    Raised by ``Fencing.raise_on_cancel()`` when a trigger fires.
+
+    Attributes:
+        cancelled: True if the Fence caught and suppressed a
+            CancelledError. False if a trigger fired but the body
+            completed before cancellation was delivered.
+        cancel_reasons: All trigger reasons that fired.
     """
 
-    def __init__(self, reasons: tuple[CancelReason, ...]) -> None:
-        self.reasons = reasons
+    def __init__(
+        self,
+        cancel_reasons: tuple[CancelReason, ...],
+        *,
+        cancelled: bool,
+    ) -> None:
+        self.cancel_reasons = cancel_reasons
+        self.cancelled = cancelled
         super().__init__(self._format_message())
 
     def cancelled_by(self, code: str) -> bool:
-        return any(r.code == code for r in self.reasons)
+        return any(r.code == code for r in self.cancel_reasons)
 
     def _format_message(self) -> str:
-        if len(self.reasons) == 1:
-            return self.reasons[0].message
-        return "; ".join(r.message for r in self.reasons)
+        if len(self.cancel_reasons) == 1:
+            return self.cancel_reasons[0].message
+        return "; ".join(r.message for r in self.cancel_reasons)
 
 
 class Fencing:
@@ -118,21 +130,21 @@ class Fencing:
         with fence:
             yield fence
 
-        if fence.cancelled:
-            raise FenceCancelled(fence.reasons)
+        if fence.triggered:
+            raise FenceCancelled(fence.cancel_reasons, cancelled=fence.cancelled)
 
     @contextmanager
     def move_on_cancel(self) -> Generator[Fence]:
         """
         Context manager that suppresses CancelledError on exit.
-        Caller inspects ``fence.cancelled`` after the block.
+        Caller inspects ``fence.cancelled`` / ``fence.triggered`` after the block.
 
         Unlike ``asyncio.timeout``, cancellation doesn't require waiting
-        for the first ``await``. Check ``fence.cancelled`` at the top
+        for the first ``await``. Check ``fence.triggered`` at the top
         of the body for immediate early exit::
 
             with Fencing().timeout(5).move_on_cancel() as fence:
-                if fence.cancelled:
+                if fence.triggered:
                     return fallback()
                 await work()
         """

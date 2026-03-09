@@ -13,8 +13,8 @@ async def test__fence__when_timeout_pre_triggered__then_suppressed_with_reasons(
         await asyncio.sleep(1)
 
     assert fence.cancelled
-    assert len(fence.reasons) == 1
-    assert fence.reasons[0].cancel_type is CancelType.TIMEOUT
+    assert len(fence.cancel_reasons) == 1
+    assert fence.cancel_reasons[0].cancel_type is CancelType.TIMEOUT
 
 
 async def test__fence__when_event_pre_set__then_suppressed_and_cancelled():
@@ -25,7 +25,7 @@ async def test__fence__when_event_pre_set__then_suppressed_and_cancelled():
         await asyncio.sleep(1)
 
     assert fence.cancelled
-    assert fence.reasons[0].cancel_type is CancelType.EVENT
+    assert fence.cancel_reasons[0].cancel_type is CancelType.EVENT
 
 
 async def test__fence__when_event_pre_set__then_body_interrupted_at_await():
@@ -52,8 +52,61 @@ async def test__fence__when_event_pre_set_sync_body__then_body_completes():
     with Fence(EventTrigger(event)) as fence:
         reached = True
 
-    assert fence.cancelled
+    assert not fence.cancelled
+    assert fence.triggered
     assert reached
+
+
+async def test__fence__when_pretriggered_sync_body__then_not_cancelled_but_triggered():
+    event = asyncio.Event()
+    event.set()
+
+    with Fence(EventTrigger(event)) as fence:
+        result = "real_result"
+
+    if fence.cancelled:
+        result = "fallback"
+
+    assert result == "real_result"
+    assert fence.triggered is True
+
+
+async def test__fence__when_pretriggered_sync_body__then_cancelled_by_still_works():
+    event = asyncio.Event()
+    event.set()
+
+    with Fence(EventTrigger(event, code="shutdown")) as fence:
+        x = 1 + 1  # noqa: F841
+
+    assert fence.cancelled is False
+    assert fence.triggered is True
+    assert fence.cancelled_by("shutdown") is True
+
+
+async def test__fence__when_zero_timeout_sync_body__then_not_cancelled_but_triggered():
+    with Fence(TimeoutTrigger(0)) as fence:
+        x = 1 + 1  # noqa: F841
+
+    assert fence.cancelled is False
+    assert fence.triggered is True
+    assert len(fence.cancel_reasons) == 1
+
+
+async def test__fence__when_timeout_fires__then_both_cancelled_and_triggered():
+    with Fence(TimeoutTrigger(0.01)) as fence:
+        await asyncio.sleep(10)
+
+    assert fence.cancelled is True
+    assert fence.triggered is True
+
+
+async def test__fence__when_no_trigger__then_neither_cancelled_nor_triggered():
+    with Fence() as fence:
+        await asyncio.sleep(0)
+
+    assert fence.cancelled is False
+    assert fence.triggered is False
+    assert fence.cancel_reasons == ()
 
 
 # --- Runtime trigger fire (not pre-set) ---
@@ -74,8 +127,8 @@ async def test__fence__when_timeout_fires__then_suppressed_with_reasons():
         await asyncio.sleep(1)
 
     assert fence.cancelled
-    assert len(fence.reasons) == 1
-    assert fence.reasons[0].cancel_type is CancelType.TIMEOUT
+    assert len(fence.cancel_reasons) == 1
+    assert fence.cancel_reasons[0].cancel_type is CancelType.TIMEOUT
 
 
 async def test__fence__when_body_catches_cancelled_error__then_counter_balanced():
@@ -87,7 +140,8 @@ async def test__fence__when_body_catches_cancelled_error__then_counter_balanced(
         except asyncio.CancelledError:
             pass
 
-    assert fence.cancelled
+    assert not fence.cancelled  # body caught CancelledError, Fence didn't suppress
+    assert fence.triggered
     assert task.cancelling() == 0
 
 
@@ -101,7 +155,8 @@ async def test__fence__when_trigger_fires_and_body_raises__then_exception_propag
             except asyncio.CancelledError:
                 raise ValueError("boom") from None
 
-    assert fence.cancelled
+    assert not fence.cancelled  # ValueError propagated, not CancelledError
+    assert fence.triggered
     assert task.cancelling() == 0
 
 
@@ -115,7 +170,8 @@ async def test__fence__when_trigger_fires_and_finally_raises__then_exception_pro
             finally:
                 raise ValueError("boom")
 
-    assert fence.cancelled
+    assert not fence.cancelled  # ValueError replaced CancelledError
+    assert fence.triggered
     assert task.cancelling() == 0
 
 
@@ -128,7 +184,8 @@ async def test__fence__when_user_uncancels_inside_body__then_counter_balanced():
         except asyncio.CancelledError:
             task.uncancel()
 
-    assert fence.cancelled
+    assert not fence.cancelled  # body caught CancelledError
+    assert fence.triggered
     assert task.cancelling() == 0
 
 
@@ -140,7 +197,7 @@ async def test__fence__when_negative_timeout__then_suppressed():
         await asyncio.sleep(1)
 
     assert fence.cancelled
-    assert fence.reasons[0].cancel_type is CancelType.TIMEOUT
+    assert fence.cancel_reasons[0].cancel_type is CancelType.TIMEOUT
 
 
 async def test__fence__when_disarm_after_trigger_fired__then_no_crash():
@@ -186,7 +243,7 @@ async def test__fence__when_event_has_code__then_reason_carries_code():
         await asyncio.sleep(1)
 
     assert fence.cancelled
-    assert fence.reasons[0].code == "shutdown"
+    assert fence.cancel_reasons[0].code == "shutdown"
 
 
 async def test__fence__when_timeout_has_code__then_reason_carries_code():
@@ -194,7 +251,7 @@ async def test__fence__when_timeout_has_code__then_reason_carries_code():
         await asyncio.sleep(1)
 
     assert fence.cancelled
-    assert fence.reasons[0].code == "request_budget"
+    assert fence.cancel_reasons[0].code == "request_budget"
 
 
 async def test__fence__when_no_code__then_reason_code_is_none():
@@ -202,7 +259,7 @@ async def test__fence__when_no_code__then_reason_code_is_none():
         await asyncio.sleep(1)
 
     assert fence.cancelled
-    assert fence.reasons[0].code is None
+    assert fence.cancel_reasons[0].code is None
 
 
 async def test__fence__cancelled_by__when_code_matches__then_true():
@@ -249,7 +306,7 @@ async def test__fence__when_multiple_triggers_fire__then_all_reasons_recorded():
         await asyncio.sleep(1)
 
     assert fence.cancelled
-    assert len(fence.reasons) == 2
+    assert len(fence.cancel_reasons) == 2
 
 
 async def test__fence__when_trigger_fires_inline__then_raises_invalid_state():
@@ -289,9 +346,10 @@ async def test__fence__when_second_trigger_fires_during_cleanup__then_both_reaso
             await asyncio.sleep(0.05)
             cleanup_done = True
 
-    assert fence.cancelled
+    assert not fence.cancelled  # body caught CancelledError during cleanup
+    assert fence.triggered
     assert cleanup_done
-    assert len(fence.reasons) == 2
+    assert len(fence.cancel_reasons) == 2
     assert asyncio.current_task().cancelling() == 0
 
 
@@ -316,8 +374,9 @@ async def test__fence__when_second_trigger_fires_after_fence__then_post_fence_as
     await asyncio.sleep(0.1)
     assert event1.is_set()
     assert event2.is_set()
-    assert fence.cancelled
-    assert len(fence.reasons) == 1
+    assert not fence.cancelled  # body caught CancelledError during cleanup
+    assert fence.triggered
+    assert len(fence.cancel_reasons) == 1
     assert asyncio.current_task().cancelling() == 0
 
 

@@ -86,7 +86,7 @@ async def test__fence__when_external_and_trigger_both_fire__then_external_propag
 
     assert task.cancelled()
     assert task.cancelling() == 1  # fence uncancelled its own, external remains
-    assert fence_cancelled  # fence's trigger also fired
+    assert not fence_cancelled  # trigger fired but fence didn't suppress (external cancel won)
 
 
 async def test__fence__when_external_cancel_with_fence__then_propagates():

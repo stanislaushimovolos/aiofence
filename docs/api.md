@@ -26,7 +26,7 @@ with on_event(shutdown, code="shutdown").move_on_cancel() as fence:
 
 Every cancellation source is a **trigger**. You declare triggers once at the boundary using a **Fencing** builder, then materialize them into a context manager. Inside the block, code runs normally — no need to thread events, flags, or tokens through call signatures.
 
-After the block, inspect `fence.cancelled`, `fence.reasons`, or `fence.cancelled_by(code)` to decide what to do.
+After the block, inspect `fence.cancelled`, `fence.cancel_reasons`, or `fence.cancelled_by(code)` to decide what to do.
 
 ## Creating a Fencing
 
@@ -89,7 +89,7 @@ with on_timeout(5).move_on_cancel() as fence:
     await work()
 
 if fence.cancelled:
-    print(fence.reasons)  # why were we cancelled?
+    print(fence.cancel_reasons)  # why were we cancelled?
 ```
 
 `CancelledError` is suppressed. Code after the `with` block always runs. Check `fence.cancelled` to decide what to do.
@@ -101,7 +101,7 @@ try:
     with on_timeout(5).raise_on_cancel() as fence:
         await work()
 except FenceCancelled as e:
-    print(e.reasons)
+    print(e.cancel_reasons)
     print(e.cancelled_by("shutdown"))
 ```
 
@@ -113,8 +113,9 @@ After the block, the `Fence` has:
 
 | Property / Method | Type | Description |
 |-------------------|------|-------------|
-| `fence.cancelled` | `bool` | `True` if any trigger fired |
-| `fence.reasons` | `tuple[CancelReason, ...]` | All reasons that fired |
+| `fence.triggered` | `bool` | `True` if any trigger fired |
+| `fence.cancelled` | `bool` | `True` if `CancelledError` was caught and suppressed |
+| `fence.cancel_reasons` | `tuple[CancelReason, ...]` | All reasons that fired |
 | `fence.cancelled_by(code)` | `bool` | Did a specific trigger fire? |
 
 Each `CancelReason` has:

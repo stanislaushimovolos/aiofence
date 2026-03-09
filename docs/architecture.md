@@ -14,7 +14,7 @@ For usage guide, examples, and custom trigger documentation see [api.md](api.md)
 
 - **`Trigger`** — abstract cancellation condition. `check()` for synchronous pre-check, `arm(callback)` for async monitoring. Returns a `TriggerHandle`.
 - **`TriggerHandle`** — live watch returned by `Trigger.arm()`. `disarm()` stops monitoring.
-- **`Fence`** — sync context manager that arms triggers against the current task. Suppresses `CancelledError` on exit. Caller inspects `fence.cancelled` / `fence.reasons` after the block.
+- **`Fence`** — sync context manager that arms triggers against the current task. Suppresses `CancelledError` on exit. Caller inspects `fence.cancelled` / `fence.cancel_reasons` after the block.
 - **`_CancelToken`** — internal. Encapsulates one `cancel()`/`uncancel()` cycle. Tracks whether the deferred cancel fired and settles ownership in `__exit__`.
 - **`CancelReason`** — frozen dataclass with `message` and `cancel_type` (TIMEOUT or EVENT).
 

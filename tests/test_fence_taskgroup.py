@@ -128,7 +128,7 @@ async def test__fence__when_trigger_fires_during_tg_teardown__then_yields_to_tg(
                 fence_cancelled = fence.cancelled
 
     assert exc_info.group_contains(ValueError)
-    assert fence_cancelled is True  # trigger fired, but Fence yielded to TG
+    assert fence_cancelled is False  # trigger fired, but Fence yielded to TG (not suppressed)
 
 
 async def test__fence__when_outer_fence_wraps_tg_with_inner_fence__then_independent():
@@ -264,7 +264,7 @@ async def test__fence__when_trigger_and_child_fail_simultaneously__then_excgroup
         await task
 
     assert exc_info.group_contains(ValueError)
-    assert fence_cancelled is True
+    assert fence_cancelled is False  # trigger fired but ExceptionGroup propagated, not suppressed
 
 
 # --- Multiple children with independent fences ---

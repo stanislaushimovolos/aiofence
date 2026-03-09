@@ -39,7 +39,8 @@ async def test__fence__when_zero_timeout_sync_body__then_body_completes():
     with Fence(TimeoutTrigger(0)) as fence:
         reached = True
 
-    assert fence.cancelled
+    assert not fence.cancelled
+    assert fence.triggered
     assert reached
 
 

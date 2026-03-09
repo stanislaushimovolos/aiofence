@@ -42,7 +42,7 @@ with (
 if not fence.cancelled:
     await save(result)
 else:
-    print(fence.reasons)              # (CancelReason(message='timed out after 30s', ...),)
+    print(fence.cancel_reasons)       # (CancelReason(message='timed out after 30s', ...),)
     print(fence.cancelled_by("shutdown"))  # True / False
 ```
 
