@@ -1,0 +1,217 @@
+"""
+ASGI middleware that owns the request's receive channel.
+
+A receive channel has exactly one useful reader — ``receive()`` is a queue pop,
+not a broadcast — and a request has several interested parties. This middleware
+sits above all of them, reads the channel once, and replays what it read.
+
+Install outermost. Rationale, install position and cost: docs/api.md; the three
+load-bearing properties (replay, record-once, response-complete tracking):
+docs/architecture.md.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections import deque
+from contextlib import suppress
+
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+from aiofence import bind_fencing, get_current_fencing
+
+from .api import DISCONNECT_CODE, DISCONNECT_EVENT_SCOPE_KEY, _publish
+
+logger = logging.getLogger("aiofence.contrib.starlette")
+
+
+class DisconnectMiddleware:
+    """
+    Own the receive channel for one request and publish its disconnect event.
+
+    Args:
+        app: Next ASGI application in the stack.
+        fencing_code: Code the disconnect event is bound under, via
+            ``get_current_fencing().event(event, code=fencing_code)``, for the
+            whole request. Defaults to ``DISCONNECT_CODE``, which is what
+            ``disconnect_fencing`` uses too — the two dedupe onto one entry.
+    """
+
+    def __init__(self, app: ASGIApp, *, fencing_code: str = DISCONNECT_CODE) -> None:
+        self.app = app
+        self.fencing_code = fencing_code
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        # Non-http scopes answer their own disconnect forever; a second install
+        # would be a second reader. Both pass through — one reader, one event.
+        if scope["type"] != "http" or DISCONNECT_EVENT_SCOPE_KEY in scope:
+            await self.app(scope, receive, send)
+            return
+
+        channel = _RequestChannel(receive)
+        channel.start()
+        try:
+            with _publish(scope, channel.disconnect_event):
+                await self._call_app(scope, channel, send)
+        finally:
+            await channel.aclose()
+
+    async def _call_app(self, scope: Scope, channel: _RequestChannel, send: Send) -> None:
+        # Ambient, so a bare Fence below is disconnect-aware and exception
+        # handlers still see it. Work that must outlive the client fences on a
+        # fresh Fencing() instead.
+        fencing = get_current_fencing().event(channel.disconnect_event, code=self.fencing_code)
+        with bind_fencing(fencing):
+            await self.app(scope, channel.receive, channel.wrap_send(send))
+
+
+class _RequestChannel:
+    """
+    Sole reader of one request's receive channel: ``start`` runs the read loop,
+    ``receive`` is what the app below sees, ``wrap_send`` follows the response
+    on its way out and catches a connection the server reports closed,
+    ``aclose`` stops the loop and wakes any waiting consumer.
+    """
+
+    def __init__(self, receive: Receive) -> None:
+        self._receive = receive
+        self._disconnect_event = asyncio.Event()
+        self._body_buffer: deque[Message] = deque()
+        self._waiters: list[asyncio.Future[None]] = []
+        self._reader: asyncio.Task[None] | None = None
+        self._response = _ResponsePhase()
+
+        self._channel_ended = False
+
+        self._failure: BaseException | None = None
+        self._failure_reported = False
+
+    @property
+    def disconnect_event(self) -> asyncio.Event:
+        return self._disconnect_event
+
+    def start(self) -> None:
+        self._reader = asyncio.create_task(self._read_channel())
+
+    async def receive(self) -> Message:
+        while True:
+            # Body in order first; the disconnect is a side channel, answered
+            # on every later call so no reader below can starve.
+            if self._body_buffer:
+                return self._body_buffer.popleft()
+            if self._failure is not None:
+                self._failure_reported = True
+                raise self._failure  # re-raised where the app actually reads
+
+            if self._channel_ended:
+                return {"type": "http.disconnect"}
+
+            await self._wait_for_activity()
+
+    async def _read_channel(self) -> None:
+        try:
+            while True:
+                message = await self._receive()
+                if message["type"] == "http.disconnect":
+                    self._record_disconnect()
+                    return  # uvicorn re-delivers it forever; reading on would spin
+
+                self._body_buffer.append(message)
+                self._wake_waiters()
+        except Exception as exc:  # noqa: BLE001
+            # A broken channel is not evidence the client left — no event.
+            self._failure = exc
+            self._wake_waiters()
+
+    async def aclose(self) -> None:
+        await self._stop_reader()
+        self._channel_ended = True
+        self._wake_waiters()
+
+        if self._failure is not None and not self._failure_reported:
+            # Log, don't raise: the response has usually already gone out.
+            logger.warning("aiofence receive channel failed and nothing read it: %r", self._failure)
+
+    def wrap_send(self, send: Send) -> Send:
+        async def watched_send(message: Message) -> None:
+            # Before, not after: the read loop can only wake once the server has
+            # processed this message, and by then the flag must already be set.
+            self._response.advance(message)
+            try:
+                await send(message)
+            except OSError:
+                self._record_send_failure()
+                raise
+
+        return watched_send
+
+    def _record_disconnect(self) -> None:
+        # After the response's last message every server sends http.disconnect;
+        # that means "stream ended", not "client left". Only here can they be told apart.
+        self._end_channel(client_left=not self._response.complete)
+
+    def _record_send_failure(self) -> None:
+        # ASGI spec 2.4: an OSError out of send is the server saying the connection
+        # is closed, and it can arrive before the disconnect message reaches the read
+        # loop. No phase check — nothing follows the response's terminal message, so a
+        # send the server refused is a response the client never got.
+        self._end_channel(client_left=True)
+
+    def _end_channel(self, *, client_left: bool) -> None:
+        self._channel_ended = True
+        if client_left:
+            self._disconnect_event.set()
+
+        self._wake_waiters()
+
+    async def _stop_reader(self) -> None:
+        if self._reader is None or self._reader.done():
+            return
+
+        self._reader.cancel()
+        with suppress(asyncio.CancelledError):
+            await self._reader
+
+    def _wake_waiters(self) -> None:
+        waiters, self._waiters = self._waiters, []
+        for waiter in waiters:
+            if not waiter.done():
+                waiter.set_result(None)
+
+    async def _wait_for_activity(self) -> None:
+        waiter = asyncio.get_running_loop().create_future()
+        self._waiters.append(waiter)
+        await waiter
+
+
+class _ResponsePhase:
+    """
+    How far the response has got, advanced by the channel's wrapped ``send`` and
+    read to answer one question: had the response already ended? A disconnect
+    after that point means "stream ended"; before it, the client left.
+    """
+
+    def __init__(self) -> None:
+        self._trailers_promised = False
+        self._complete = False
+
+    @property
+    def complete(self) -> bool:
+        return self._complete
+
+    def advance(self, message: Message) -> None:
+        if self._complete:
+            return
+
+        # Promised trailers move the end of the response past the final body
+        # message — a client leaving in between has genuinely left.
+        kind = message["type"]
+        if kind == "http.response.start":
+            self._trailers_promised = bool(message.get("trailers", False))
+        elif kind == "http.response.trailers":
+            self._complete = not message.get("more_trailers", False)
+        elif kind == "http.response.pathsend":
+            self._complete = not self._trailers_promised
+        elif kind == "http.response.body":
+            self._complete = not message.get("more_body", False) and not self._trailers_promised

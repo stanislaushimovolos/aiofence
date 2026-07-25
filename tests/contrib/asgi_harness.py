@@ -1,0 +1,112 @@
+from __future__ import annotations
+
+import asyncio
+import json
+from typing import Any
+
+from fastapi import FastAPI
+from starlette.types import ASGIApp, Message, Receive, Scope
+
+from aiofence import get_current_fencing
+from aiofence.contrib.starlette import DisconnectMiddleware
+
+
+def fenced_app(**kwargs: Any) -> FastAPI:
+    """
+    FastAPI with ``DisconnectMiddleware`` outermost — the disconnect
+    dependencies require it and raise without it.
+    """
+    app = FastAPI(**kwargs)
+    app.add_middleware(DisconnectMiddleware)
+    return app
+
+
+def http_scope(path: str = "/work", spec_version: str = "2.3") -> Scope:
+    return {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": spec_version},
+        "http_version": "1.1",
+        "method": "GET",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "root_path": "",
+        "scheme": "http",
+        "headers": [(b"host", b"testserver")],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+    }
+
+
+def post_scope(content_length: int, path: str = "/work") -> Scope:
+    return {
+        **http_scope(path),
+        "method": "POST",
+        "headers": [
+            (b"host", b"testserver"),
+            (b"content-type", b"application/json"),
+            (b"content-length", str(content_length).encode()),
+        ],
+    }
+
+
+class ScriptedReceive:
+    """
+    Replays the scripted messages, then blocks — client stays connected forever.
+
+    ``calls`` counts every ``receive()``, which is how a test tells one shared
+    watcher from two rival readers.
+    """
+
+    def __init__(self, *messages: Message) -> None:
+        self.calls = 0
+        self._pending = list(messages)
+
+    async def __call__(self) -> Message:
+        self.calls += 1
+        if self._pending:
+            return self._pending.pop(0)
+
+        await asyncio.Event().wait()
+        raise AssertionError  # pragma: no cover
+
+
+def scripted_receive(*messages: Message) -> ScriptedReceive:
+    return ScriptedReceive(*messages)
+
+
+async def call_app(
+    app: ASGIApp,
+    *,
+    scope: Scope | None = None,
+    receive: Receive | None = None,
+) -> Any:
+    return json.loads(await call_app_body(app, scope=scope, receive=receive))
+
+
+async def call_app_body(
+    app: ASGIApp,
+    *,
+    scope: Scope | None = None,
+    receive: Receive | None = None,
+) -> bytes:
+    sent: list[Message] = []
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    # A stalled receive channel hangs rather than fails — bound it so CI can't block.
+    async with asyncio.timeout(5):
+        await app(scope or http_scope(), receive or scripted_receive(), send)
+
+    return b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+
+
+def bound_codes() -> list[str | None]:
+    """
+    Codes registered on the ambient fencing, sorted.
+
+    ``Fencing.event()`` prepends, so insertion order would read backwards —
+    sorting makes a two-code assertion unambiguous instead of order-dependent.
+    """
+    return sorted((entry.code for entry in get_current_fencing()._events), key=str)

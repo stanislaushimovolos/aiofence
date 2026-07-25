@@ -117,31 +117,29 @@ elif fence.cancelled_by("budget"):
 
 ## Starlette / FastAPI
 
-`disconnect_fencing` binds a client-disconnect trigger to the current `Fencing` context via `bind_fencing()`. When the client disconnects, any active `Fence` — anywhere in the call stack — is cancelled with `code="disconnect"`:
+`DisconnectMiddleware` owns the request's receive channel — one reader, replayed to everything below it — and binds its disconnect event to the current `Fencing` context via `bind_fencing()` for the whole request. Installing it is the whole setup: when the client disconnects, any fence created from `get_current_fencing()` — anywhere in the call stack — is cancelled with `code="disconnect"` (`DISCONNECT_CODE`). Declaring `DisconnectFencing` on a route is optional, and only needed for a per-route code:
 
 ```python
-from aiofence.contrib.starlette import disconnect_fencing
+from starlette.middleware import Middleware
+from aiofence.contrib.starlette import DISCONNECT_CODE, DisconnectMiddleware
+
+app = FastAPI(middleware=[Middleware(DisconnectMiddleware)])   # outermost, required
 
 @app.get("/work")
-async def handler(fencing: Fencing = Depends(disconnect_fencing)):
-    with fencing.timeout(30, code="budget").move_on_cancel() as fence:
+async def handler():
+    with get_current_fencing().timeout(30, code="budget").move_on_cancel() as fence:
         await long_work()
 
-    if fence.cancelled_by("disconnect"):
+    if fence.cancelled_by(DISCONNECT_CODE):
         return Response(status_code=499)
 ```
 
-The real value is that `disconnect_fencing` calls `bind_fencing()` internally, so service-layer code doesn't need to know about HTTP, requests, or disconnect events — it reads the cancellation context via `get_current_fencing()`:
+The real value is that the binding is ambient, so service-layer code doesn't need to know about HTTP, requests, or disconnect events — it reads the cancellation context via `get_current_fencing()`:
 
 ```python
-from aiofence.contrib.starlette import disconnect_fencing
-
-# handler — declares cancellation sources at the boundary
+# handler — no fencing wiring at the boundary either
 @app.get("/generate")
-async def handler(
-    prompt: str,
-    _ = Depends(disconnect_fencing),
-):
+async def handler(prompt: str):
     result = await generate_response(prompt)
     return {"status": "ok", "result": result}
 
@@ -162,6 +160,15 @@ async def generate_response(prompt: str) -> str:
     return result
 ```
 
+Code with no dependency and no `Request` to hand can read the event straight from the ambient request:
+
+```python
+from aiofence.contrib.starlette import get_disconnect_event
+
+async def deep_helper():
+    gone = get_disconnect_event()          # None when the middleware isn't installed
+```
+
 Requires `starlette` (installed with FastAPI). No additional dependencies.
 
 ## Documentation
@@ -169,11 +176,14 @@ Requires `starlette` (installed with FastAPI). No additional dependencies.
 - [API Guide](docs/api.md) — usage, patterns, and examples
 - [Architecture](docs/architecture.md) — how it works, cancellation flow, design decisions
 - [Why Suppress](docs/why-suppress.md) — why `CancelledError` is suppressed instead of raised
+- [Disconnect Delivery — Design Rationale](docs/disconnect-watcher-analysis.md) — why the middleware owns the receive channel, and why the dependencies have no fallback
 - [CPython Task Cancellation](docs/cpython-task-cancellation.md) — how `asyncio.Task` cancellation works under the hood
 
 ## Caveats
 
 **Nested Fences are not supported.** Entering a `Fence` while another is active on the same task raises `RuntimeError`. Use sequential fences or `get_current_fencing()` composition instead. See [#12](https://github.com/stanislaushimovolos/aiofence/issues/12) for details and progress.
+
+**The disconnect dependencies require `DisconnectMiddleware`** and raise `RuntimeError` without it. There is no fallback on purpose: an ASGI receive channel has one useful reader, and anything reading it from below the middleware steals body chunks and streaming messages from the rest of the stack — and cannot tell "the client left" from "the response finished", which cancels background tasks on every successful request. See [the API guide](docs/api.md#why-the-middleware-is-required) and the [Disconnect Watcher Analysis](docs/disconnect-watcher-analysis.md).
 
 ## Requirements
 

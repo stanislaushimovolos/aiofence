@@ -1,0 +1,29 @@
+name: pre-commit autoupdate
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  autoupdate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv run pre-commit autoupdate
+      - uses: peter-evans/create-pull-request@v7
+        with:
+          branch: chore/pre-commit-autoupdate
+          title: "chore: update pre-commit hooks"
+          commit-message: "chore: update pre-commit hooks"
+          body: |
+            Automated `pre-commit autoupdate`.
+
+            Bumps the pinned `rev` of remote hook repos. Local hooks (ruff, mypy)
+            track the dev dependency group and are updated by Dependabot instead.
+          delete-branch: true

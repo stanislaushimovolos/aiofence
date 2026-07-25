@@ -115,7 +115,12 @@ class Fence:
             raise RuntimeError("Fence cannot be reused")
 
         task = asyncio.current_task()
-        assert task is not None  # noqa: S101
+        if task is None:
+            raise RuntimeError(
+                "Fence needs a running asyncio task to cancel, and was entered "
+                "outside one — from a loop callback, or from sync code running in "
+                "a worker thread (e.g. a FastAPI `def` handler)."
+            )
 
         if task in _active_fences:
             raise RuntimeError(

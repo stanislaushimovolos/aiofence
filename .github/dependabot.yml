@@ -1,0 +1,27 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore"
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore"
+    groups:
+      # Dependabot's uv support classifies every dependency as "production",
+      # so `dependency-type: development` matches nothing here — group by name
+      # and keep the contrib floors out so each gets its own reviewable PR.
+      dev-dependencies:
+        patterns: ["*"]
+        exclude-patterns:
+          - "fastapi"
+          - "starlette"
