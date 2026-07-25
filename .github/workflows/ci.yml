@@ -10,8 +10,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
       - run: uv run ruff check
       - run: uv run ruff format --check
       - run: uv run mypy aiofence
@@ -23,8 +23,8 @@ jobs:
         python-version: ["3.12", "3.13", "3.14"]
         event-loop: [asyncio, uvloop]
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ matrix.python-version }}
       - name: Run tests
@@ -34,7 +34,7 @@ jobs:
           else
             uv run pytest --cov=aiofence --cov-report=xml
           fi
-      - uses: codecov/codecov-action@v5
+      - uses: codecov/codecov-action@v7
         if: matrix.python-version == '3.13' && matrix.event-loop == 'asyncio'
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
