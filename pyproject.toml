@@ -38,7 +38,6 @@ path = "aiofence/__version__.py"
 [dependency-groups]
 dev = [
     "fastapi>=0.118",
-    "hypercorn>=0.17",
     "mypy>=1.15.0",
     "pre-commit>=4.2.0",
     "pytest>=8.0",
@@ -47,7 +46,6 @@ dev = [
     "ruff>=0.15.2",
     "sse-starlette>=2.0",
     "starlette>=0.42",
-    "uvicorn>=0.30",
     "uvloop>=0.21",
 ]
 
@@ -57,9 +55,6 @@ strict = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-markers = [
-    "live: runs a real uvicorn / hypercorn server over a socket (tests/contrib/live)",
-]
 
 [tool.ruff]
 target-version = "py312"

@@ -22,11 +22,6 @@ The completion rule is deliberately reimplemented here rather than imported from
 sharing the predicate with the code under test would make it agree by
 construction.
 
-A model can drift from the thing it models, and nothing in this file would
-notice. ``tests/contrib/live/test_server_contract.py`` runs real uvicorn and
-hypercorn against the two claims that matter most here — ``DeliveryMode`` and
-the ``spec_version`` floor — so a server release that changes them fails there.
-
 Every helper is bounded by ``DEFAULT_TIMEOUT`` so a hang fails the test instead
 of blocking CI.
 """
