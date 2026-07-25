@@ -81,6 +81,16 @@ async def test__route_dependencies__when_also_declared_as_param__then_single_tri
     assert await call_app(app) == {"codes": ["disconnect"]}
 
 
+async def test__app_dependencies__when_mixed_with_aliases__then_one_shared_trigger() -> None:
+    app = FastAPI(dependencies=[Depends(disconnect_fencing)])
+
+    @app.get("/work")
+    async def work(fencing: DisconnectFencing, gone: DisconnectEvent) -> dict[str, Any]:
+        return {"codes": bound_codes(), "shared": gone is fencing._events[0].event}
+
+    assert await call_app(app) == {"codes": ["disconnect"], "shared": True}
+
+
 # --- dependency aliases ---
 
 

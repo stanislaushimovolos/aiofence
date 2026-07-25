@@ -349,6 +349,47 @@ router = APIRouter(
 
 Sync (`def`) handlers are not cancellable — FastAPI runs them in a threadpool. The dependency still binds and `fence.cancelled_by(...)` still reports correctly, but nothing interrupts the handler.
 
+### FastAPI forms at a glance
+
+| you want | write |
+|---|---|
+| the `Fencing` as a parameter | `async def handler(fencing: DisconnectFencing)` |
+| just the disconnect event | `async def handler(gone: DisconnectEvent)` |
+| no parameter, one route | `@app.get(..., dependencies=[Depends(disconnect_fencing)])` |
+| no parameter, one router | `APIRouter(dependencies=[Depends(disconnect_fencing)])` |
+| no parameter, whole app | `FastAPI(dependencies=[Depends(disconnect_fencing)])` |
+| a custom code | `Depends(disconnect_fencing_dependency(code="client_gone"))` |
+
+The two annotations come from `aiofence.contrib.fastapi`, the dependencies from `aiofence.contrib.starlette`. Mixing forms on one endpoint is safe — they share a single watcher, so declaring the app-wide dependency *and* taking a `DisconnectFencing` parameter still yields one disconnect trigger.
+
+```python
+from fastapi import Depends, FastAPI
+from aiofence import get_current_fencing
+from aiofence.contrib.fastapi import DisconnectEvent, DisconnectFencing
+from aiofence.contrib.starlette import disconnect_fencing
+
+app = FastAPI(dependencies=[Depends(disconnect_fencing)])
+
+@app.get("/render")                       # reads it from the context
+async def render():
+    with get_current_fencing().timeout(30, code="budget").move_on_cancel() as fence:
+        return await render_scene()
+
+@app.get("/work")                         # wants the builder itself
+async def work(fencing: DisconnectFencing):
+    with fencing.timeout(5, code="db").move_on_cancel() as fence:
+        return await query()
+
+@app.get("/search")                       # wants to stop at its own pace
+async def search(gone: DisconnectEvent):
+    hits = []
+    for shard in shards:
+        if gone.is_set():
+            break
+        hits += await query(shard)
+    return hits
+```
+
 ### Caveats: the watcher owns the receive channel
 
 While a disconnect fencing is bound, its watcher loops on `receive()` and discards every message that isn't `http.disconnect`. An ASGI receive channel has only one useful reader, so anything else in the stack that reads it splits the message stream with the watcher. Three consequences:
@@ -356,14 +397,43 @@ While a disconnect fencing is bound, its watcher loops on `receive()` and discar
 **Don't read the raw body.** `await request.body()` or `request.stream()` inside a fenced handler races the watcher and can hang. Declare the body as a parameter instead — FastAPI caches it before dependencies run, so a later `request.body()` returns cached bytes:
 
 ```python
-@app.post("/upload", dependencies=[Depends(disconnect_fencing)])
-async def handler(payload: Payload, request: Request):
+@app.post("/upload")
+async def handler(fencing: DisconnectFencing, payload: Payload, request: Request):
     await something()
-    body = await request.body()   # cached — safe
+    body = await request.body()      # cached — safe
+
+@app.post("/raw")
+async def handler(fencing: DisconnectFencing, request: Request):
+    await something()
+    body = await request.body()      # unfenced read — may hang
 ```
 
 **Streaming responses are unreliable.** Starlette's `StreamingResponse` runs its own disconnect listener when the server declares ASGI `spec_version` below `2.4`. Whether the fence or the stream sees the disconnect depends on scheduling. Servers declaring `2.4` or higher are unaffected.
 
+```python
+@app.get("/stream")
+async def handler(fencing: DisconnectFencing):
+    async def body():
+        yield first_chunk
+        with fencing.move_on_cancel() as fence:
+            await slow_step()        # may or may not be cancelled on disconnect
+        yield second_chunk
+
+    return StreamingResponse(body())
+```
+
 **SSE disables sse-starlette's close handling.** `EventSourceResponse` always reads the channel. The watcher wins consistently, so `cancelled_by("disconnect")` works — but `client_close_handler_callable` never runs and pings keep going to a closed socket. If you rely on that handler, leave the endpoint unfenced.
+
+```python
+@app.get("/tokens")
+async def handler(fencing: DisconnectFencing):
+    async def events():
+        with fencing.move_on_cancel() as fence:
+            async for token in llm.stream(prompt):
+                yield token
+        # fence.cancelled_by("disconnect") is True here, but on_close never ran
+
+    return EventSourceResponse(events(), client_close_handler_callable=on_close)
+```
 
 All three have the same fix, which needs middleware rather than a dependency. See [Receive Channel Conflicts](receive-channel-conflicts.md) for the mechanics, evidence, and planned fix.
