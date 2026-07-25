@@ -349,39 +349,17 @@ router = APIRouter(
 
 Sync (`def`) handlers are not cancellable — FastAPI runs them in a threadpool. The dependency still binds and `fence.cancelled_by(...)` still reports correctly, but nothing interrupts the handler.
 
-### FastAPI forms at a glance
+### Both dependencies, both frameworks
 
-| you want | write |
-|---|---|
-| the `Fencing` as a parameter | `async def handler(fencing: DisconnectFencing)` |
-| just the disconnect event | `async def handler(gone: DisconnectEvent)` |
-| no parameter, one route | `@app.get(..., dependencies=[Depends(disconnect_fencing)])` |
-| no parameter, one router | `APIRouter(dependencies=[Depends(disconnect_fencing)])` |
-| no parameter, whole app | `FastAPI(dependencies=[Depends(disconnect_fencing)])` |
-| a custom code | `Depends(disconnect_fencing_dependency(code="client_gone"))` |
-
-The two annotations come from `aiofence.contrib.fastapi`, the dependencies from `aiofence.contrib.starlette`. Mixing forms on one endpoint is safe — they share a single watcher, so declaring the app-wide dependency *and* taking a `DisconnectFencing` parameter still yields one disconnect trigger.
+The disconnect event — stop at your own pace:
 
 ```python
-from fastapi import Depends, FastAPI
-from aiofence import get_current_fencing
-from aiofence.contrib.fastapi import DisconnectEvent, DisconnectFencing
-from aiofence.contrib.starlette import disconnect_fencing
+# Starlette
+async def handler(gone: asyncio.Event = Depends(disconnect_event)):
+    ...
 
-app = FastAPI(dependencies=[Depends(disconnect_fencing)])
-
-@app.get("/render")                       # reads it from the context
-async def render():
-    with get_current_fencing().timeout(30, code="budget").move_on_cancel() as fence:
-        return await render_scene()
-
-@app.get("/work")                         # wants the builder itself
-async def work(fencing: DisconnectFencing):
-    with fencing.timeout(5, code="db").move_on_cancel() as fence:
-        return await query()
-
-@app.get("/search")                       # wants to stop at its own pace
-async def search(gone: DisconnectEvent):
+# FastAPI
+async def handler(gone: DisconnectEvent):
     hits = []
     for shard in shards:
         if gone.is_set():
@@ -389,6 +367,25 @@ async def search(gone: DisconnectEvent):
         hits += await query(shard)
     return hits
 ```
+
+The fencing — be cancelled instead:
+
+```python
+# Starlette
+async def handler(fencing: Fencing = Depends(disconnect_fencing)):
+    ...
+
+# FastAPI
+async def handler(fencing: DisconnectFencing):
+    with fencing.timeout(30, code="budget").move_on_cancel() as fence:
+        result = await render_scene()
+
+    if fence.cancelled_by("disconnect"):
+        return Response(status_code=499)
+    return result
+```
+
+`DisconnectEvent` and `DisconnectFencing` come from `aiofence.contrib.fastapi`; both dependencies from `aiofence.contrib.starlette`.
 
 ### Caveats: the watcher owns the receive channel
 
