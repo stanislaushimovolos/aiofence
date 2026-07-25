@@ -159,6 +159,15 @@ async def generate_response(prompt: str) -> str:
     return result
 ```
 
+Add `DisconnectMiddleware` at the boundary so the disconnect signal is shared rather than stolen — one reader for the receive channel, replayed to everything below it:
+
+```python
+from starlette.middleware import Middleware
+from aiofence.contrib.middleware import DisconnectMiddleware
+
+app = FastAPI(middleware=[Middleware(DisconnectMiddleware)])   # outermost
+```
+
 Requires `starlette` (installed with FastAPI). No additional dependencies.
 
 ## Documentation
@@ -166,14 +175,14 @@ Requires `starlette` (installed with FastAPI). No additional dependencies.
 - [API Guide](docs/api.md) — usage, patterns, and examples
 - [Architecture](docs/architecture.md) — how it works, cancellation flow, design decisions
 - [Why Suppress](docs/why-suppress.md) — why `CancelledError` is suppressed instead of raised
-- [Receive Channel Conflicts](docs/receive-channel-conflicts.md) — how the disconnect watcher interacts with raw body reads, `StreamingResponse`, and sse-starlette
+- [Disconnect Watcher Analysis](docs/disconnect-watcher-analysis.md) — how the disconnect watcher interacts with the ASGI stack, and where it breaks
 - [CPython Task Cancellation](docs/cpython-task-cancellation.md) — how `asyncio.Task` cancellation works under the hood
 
 ## Caveats
 
 **Nested Fences are not supported.** Entering a `Fence` while another is active on the same task raises `RuntimeError`. Use sequential fences or `get_current_fencing()` composition instead. See [#12](https://github.com/stanislaushimovolos/aiofence/issues/12) for details and progress.
 
-**The disconnect dependencies own the ASGI receive channel.** While one is active the handler must not read the raw body, and streaming responses are unreliable — Starlette's `StreamingResponse` and sse-starlette's `EventSourceResponse` read the same channel, and the readers compete. See [Receive Channel Conflicts](docs/receive-channel-conflicts.md).
+**The disconnect dependencies need `DisconnectMiddleware`.** On their own they own the ASGI receive channel: the handler must not read the raw body, streaming responses are unreliable — Starlette's `StreamingResponse` and sse-starlette's `EventSourceResponse` read the same channel and the readers compete — and the event fires when the response completes, not only when the client leaves, so background tasks are cancelled on every successful request. `DisconnectMiddleware` fixes all of it by reading the channel once and replaying it downstream; the dependencies then borrow its event. See [the API guide](docs/api.md#disconnectmiddleware--one-reader-for-the-channel) and the [Disconnect Watcher Analysis](docs/disconnect-watcher-analysis.md).
 
 ## Requirements
 

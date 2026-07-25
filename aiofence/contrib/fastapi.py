@@ -28,9 +28,19 @@ as the ambient context so anything the handler calls picks it up from
 Handlers that never touch the value should skip the parameter and declare
 ``dependencies=[Depends(disconnect_fencing)]`` on the route, router, or app.
 
-Requires ``fastapi``. For plain Starlette use ``aiofence.contrib.starlette``,
-which these are built from. Both aliases inherit that module's receive-channel
-restrictions — see docs/receive-channel-conflicts.md.
+Requires ``fastapi>=0.118`` (``pip install "aiofence[fastapi]"``); 0.106-0.117
+tear yield dependencies down before the response is sent, which leaves the
+watcher dead for the whole streaming phase.
+
+Install ``aiofence.contrib.middleware.DisconnectMiddleware`` outermost. Without
+it both aliases inherit the dependency's receive-channel restrictions, and the
+disconnect signal also fires when the response completes — so anything running
+after that point, ``BackgroundTasks`` in particular, sees an already-cancelled
+fencing on every request. Sync (``def``) handlers cannot enter a fence either
+way. See docs/disconnect-watcher-analysis.md.
+
+For plain Starlette use ``aiofence.contrib.starlette``, which these are built
+from.
 """
 
 from __future__ import annotations

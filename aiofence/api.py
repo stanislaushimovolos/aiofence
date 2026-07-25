@@ -109,8 +109,11 @@ class Fencing:
 
     def event(self, event: asyncio.Event, *, code: str | None = None) -> Fencing:
         """
-        Add an event-based cancellation condition. If the same event is
-        registered again, the code is overridden (last wins).
+        Add an event-based cancellation condition.
+
+        Entries are deduplicated on the ``(event, code)`` pair: registering
+        the same event under a different code keeps both, and each is
+        reported independently by ``fence.cancelled_by(code)``.
 
         Args:
             event: asyncio.Event that triggers cancellation when set.
@@ -118,7 +121,7 @@ class Fencing:
                   via ``fence.cancelled_by(code)``.
         """
         new_entry = _EventEntry(code=code, event=event)
-        existing = tuple(e for e in self._events if e.event is not event)
+        existing = tuple(e for e in self._events if e != new_entry)
         return self._derive(_events=(new_entry, *existing))
 
     @contextmanager

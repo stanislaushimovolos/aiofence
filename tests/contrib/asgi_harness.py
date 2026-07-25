@@ -38,16 +38,29 @@ def post_scope(content_length: int, path: str = "/work") -> Scope:
     }
 
 
-def scripted_receive(*messages: Message) -> Receive:
-    pending = list(messages)
+class ScriptedReceive:
+    """
+    Replays the scripted messages, then blocks — client stays connected forever.
 
-    async def receive() -> Message:
-        if pending:
-            return pending.pop(0)
-        await asyncio.Event().wait()  # client stays connected, forever
+    ``calls`` counts every ``receive()``, which is how a test tells one shared
+    watcher from two rival readers.
+    """
+
+    def __init__(self, *messages: Message) -> None:
+        self.calls = 0
+        self._pending = list(messages)
+
+    async def __call__(self) -> Message:
+        self.calls += 1
+        if self._pending:
+            return self._pending.pop(0)
+
+        await asyncio.Event().wait()
         raise AssertionError  # pragma: no cover
 
-    return receive
+
+def scripted_receive(*messages: Message) -> ScriptedReceive:
+    return ScriptedReceive(*messages)
 
 
 async def call_app(
@@ -78,4 +91,10 @@ async def call_app_body(
 
 
 def bound_codes() -> list[str | None]:
-    return [entry.code for entry in get_current_fencing()._events]
+    """
+    Codes registered on the ambient fencing, sorted.
+
+    ``Fencing.event()`` prepends, so insertion order would read backwards —
+    sorting makes a two-code assertion unambiguous instead of order-dependent.
+    """
+    return sorted((entry.code for entry in get_current_fencing()._events), key=str)

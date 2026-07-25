@@ -186,14 +186,40 @@ async def test__event__when_same_event_same_code__then_collapses() -> None:
         assert len(event_triggers) == 1
 
 
-async def test__event__when_same_event_different_codes__then_last_wins() -> None:
+async def test__event__when_same_event_different_codes__then_both_kept() -> None:
     ev = asyncio.Event()
     ctx = Fencing().event(ev, code="a").event(ev, code="b")
 
     with ctx.move_on_cancel() as fence:
         event_triggers = [t for t in fence._triggers if isinstance(t, EventTrigger)]
-        assert len(event_triggers) == 1
-        assert event_triggers[0]._code == "b"
+        assert {t._code for t in event_triggers} == {"a", "b"}
+
+
+async def test__event__when_same_event_different_codes__then_both_codes_reported() -> None:
+    ev = asyncio.Event()
+    ctx = Fencing().event(ev, code="a").event(ev, code="b")
+
+    async def fire() -> None:
+        ev.set()
+
+    task = asyncio.create_task(fire())
+    with ctx.move_on_cancel() as fence:
+        await asyncio.sleep(10)
+    await task
+
+    assert fence.cancelled_by("a")
+    assert fence.cancelled_by("b")
+
+
+async def test__event__when_pre_set_and_two_codes__then_both_codes_reported() -> None:
+    ev = asyncio.Event()
+    ev.set()
+
+    with Fencing().event(ev, code="a").event(ev, code="b").move_on_cancel() as fence:
+        await asyncio.sleep(10)
+
+    assert fence.cancelled_by("a")
+    assert fence.cancelled_by("b")
 
 
 # --- Anchored reuse ---
@@ -449,3 +475,22 @@ async def test__on_timeout__chaining__then_works() -> None:
 async def test__on_timeout__returns_anchored() -> None:
     result = on_timeout(5)
     assert result._anchored is True
+
+
+# --- No running task ---
+
+
+async def test__move_on_cancel__when_no_running_task__then_raises_runtime_error() -> None:
+    errors: list[RuntimeError] = []
+
+    def enter_outside_a_task() -> None:
+        try:
+            with Fencing().move_on_cancel():
+                pass
+        except RuntimeError as exc:
+            errors.append(exc)
+
+    asyncio.get_running_loop().call_soon(enter_outside_a_task)
+    await asyncio.sleep(0)
+
+    assert "needs a running asyncio task" in str(errors[0])

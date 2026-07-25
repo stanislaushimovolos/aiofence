@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from typing import Annotated, Any
+from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI
 from starlette.requests import Request
@@ -71,14 +71,96 @@ async def test__route_dependencies__when_nested_callee__then_fencing_propagates(
     assert await call_app(app) == {"codes": ["disconnect"]}
 
 
-async def test__route_dependencies__when_also_declared_as_param__then_single_trigger() -> None:
+async def test__route_dependencies__when_declared_twice__then_solved_once() -> None:
+    """One callable, one FastAPI cache key — this proves caching, not sharing."""
     app = FastAPI()
+    solved: list[str] = []
 
-    @app.get("/work", dependencies=[Depends(disconnect_fencing)])
-    async def work(_: Annotated[Fencing, Depends(disconnect_fencing)]) -> dict[str, Any]:
+    async def counted(request: Request) -> AsyncIterator[Fencing]:
+        solved.append("x")
+        async for fencing in disconnect_fencing(request):
+            yield fencing
+
+    @app.get("/work", dependencies=[Depends(counted), Depends(counted)])
+    async def work() -> dict[str, Any]:
         return {"codes": bound_codes()}
 
     assert await call_app(app) == {"codes": ["disconnect"]}
+    assert solved == ["x"]
+
+
+# --- two distinct dependencies on one request ---
+
+
+async def test__distinct_dependencies__when_declared__then_share_one_event() -> None:
+    """Two callables FastAPI cannot collapse by cache key — real sharing, not caching."""
+    app = FastAPI()
+    client_gone = disconnect_fencing_dependency(code="client_gone")
+
+    @app.get("/work", dependencies=[Depends(disconnect_fencing), Depends(client_gone)])
+    async def work() -> dict[str, Any]:
+        events = {id(entry.event) for entry in get_current_fencing()._events}
+        return {"events": len(events)}
+
+    assert await call_app(app) == {"events": 1}
+
+
+async def test__distinct_dependencies__when_codes_differ__then_both_bound() -> None:
+    app = FastAPI()
+    client_gone = disconnect_fencing_dependency(code="client_gone")
+
+    @app.get("/work", dependencies=[Depends(disconnect_fencing), Depends(client_gone)])
+    async def work() -> dict[str, Any]:
+        return {"codes": bound_codes()}
+
+    assert await call_app(app) == {"codes": ["client_gone", "disconnect"]}
+
+
+async def test__app_and_router_dependencies__when_codes_differ__then_both_bound() -> None:
+    """The layering docs/api.md recommends: app-wide default plus a router override."""
+    router = APIRouter(dependencies=[Depends(disconnect_fencing_dependency(code="client_gone"))])
+
+    @router.get("/work")
+    async def work() -> dict[str, Any]:
+        return {"codes": bound_codes()}
+
+    app = FastAPI(dependencies=[Depends(disconnect_fencing)])
+    app.include_router(router)
+
+    assert await call_app(app) == {"codes": ["client_gone", "disconnect"]}
+
+
+async def test__app_and_router_dependencies__when_disconnect__then_both_codes_cancel() -> None:
+    router = APIRouter(dependencies=[Depends(disconnect_fencing_dependency(code="client_gone"))])
+
+    @router.get("/work")
+    async def work() -> dict[str, Any]:
+        with get_current_fencing().move_on_cancel() as fence:
+            await asyncio.sleep(10)
+
+        return {
+            "disconnect": fence.cancelled_by("disconnect"),
+            "client_gone": fence.cancelled_by("client_gone"),
+        }
+
+    app = FastAPI(dependencies=[Depends(disconnect_fencing)])
+    app.include_router(router)
+
+    result = await call_app(app, receive=scripted_receive({"type": "http.disconnect"}))
+
+    assert result == {"disconnect": True, "client_gone": True}
+
+
+async def test__aliases__when_both_declared__then_single_receive_loop() -> None:
+    app = FastAPI()
+    receive = scripted_receive()
+
+    @app.get("/work")
+    async def work(fencing: DisconnectFencing, gone: DisconnectEvent) -> dict[str, Any]:  # noqa: ARG001
+        await asyncio.sleep(0)
+        return {"calls": receive.calls}
+
+    assert await call_app(app, receive=receive) == {"calls": 1}
 
 
 async def test__app_dependencies__when_mixed_with_aliases__then_one_shared_trigger() -> None:
@@ -226,3 +308,61 @@ async def test__streaming_response__when_server_owns_no_reader__then_fence_cance
     )
 
     assert result == b"start;disconnect=True;"
+
+
+# --- sync (def) handlers ---
+
+
+async def test__sync_handler__when_fenced__then_ambient_codes_visible() -> None:
+    app = FastAPI()
+
+    @app.get("/work", dependencies=[Depends(disconnect_fencing)])
+    def work() -> dict[str, Any]:
+        return {"codes": bound_codes()}
+
+    assert await call_app(app) == {"codes": ["disconnect"]}
+
+
+async def test__sync_handler__when_entering_fence__then_raises_runtime_error() -> None:
+    """The threadpool has no running loop, so a `def` handler cannot be fenced."""
+    app = FastAPI()
+
+    @app.get("/work", dependencies=[Depends(disconnect_fencing)])
+    def work() -> dict[str, Any]:
+        try:
+            with get_current_fencing().move_on_cancel():
+                pass
+        except RuntimeError as exc:
+            return {"error": type(exc).__name__, "message": str(exc)}
+        return {"error": None, "message": ""}
+
+    result = await call_app(app)
+
+    assert result["error"] == "RuntimeError"
+    assert "event loop" in result["message"]
+
+
+# --- the code is not client-controllable ---
+
+
+async def test__disconnect_fencing__when_code_in_query_string__then_ignored() -> None:
+    """A `code` kwarg on the dependency would be a client-settable query param."""
+    app = FastAPI(dependencies=[Depends(disconnect_fencing)])
+
+    @app.get("/work")
+    async def work() -> dict[str, Any]:
+        return {"codes": bound_codes()}
+
+    scope = {**http_scope(), "query_string": b"code=INJECTED"}
+
+    assert await call_app(app, scope=scope) == {"codes": ["disconnect"]}
+
+
+async def test__disconnect_fencing__when_route_declared__then_no_query_param_in_schema() -> None:
+    app = FastAPI()
+
+    @app.get("/work", dependencies=[Depends(disconnect_fencing)])
+    async def work() -> dict[str, Any]:
+        return {}
+
+    assert "parameters" not in app.openapi()["paths"]["/work"]["get"]

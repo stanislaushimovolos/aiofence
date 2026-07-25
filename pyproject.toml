@@ -15,6 +15,16 @@ classifiers = [
 ]
 dependencies = []
 
+# The core package stays dependency-free. These extras carry only the floors
+# `aiofence.contrib` needs: FastAPI >= 0.118 tears yield dependencies down
+# after the response (0.106-0.117 did it before, which kills the disconnect
+# watcher for the whole streaming phase), and Starlette >= 0.42 has the ASGI
+# spec_version gate in StreamingResponse.
+# See docs/disconnect-watcher-analysis.md.
+[project.optional-dependencies]
+fastapi = ["fastapi>=0.118"]
+starlette = ["starlette>=0.42"]
+
 [project.urls]
 Repository = "https://github.com/stanislaushimovolos/aiofence"
 
@@ -27,7 +37,7 @@ path = "aiofence/__version__.py"
 
 [dependency-groups]
 dev = [
-    "fastapi>=0.100",
+    "fastapi>=0.118",
     "mypy>=1.15.0",
     "pre-commit>=4.2.0",
     "pytest>=8.0",
@@ -35,7 +45,7 @@ dev = [
     "pytest-cov>=6.0",
     "ruff>=0.15.2",
     "sse-starlette>=2.0",
-    "starlette>=0.27",
+    "starlette>=0.42",
     "uvloop>=0.21",
 ]
 

@@ -6,6 +6,14 @@ requires-python = ">=3.12, <3.15"
 name = "aiofence"
 source = { editable = "." }
 
+[package.optional-dependencies]
+fastapi = [
+    { name = "fastapi" },
+]
+starlette = [
+    { name = "starlette" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "fastapi" },
@@ -21,10 +29,15 @@ dev = [
 ]
 
 [package.metadata]
+requires-dist = [
+    { name = "fastapi", marker = "extra == 'fastapi'", specifier = ">=0.118" },
+    { name = "starlette", marker = "extra == 'starlette'", specifier = ">=0.42" },
+]
+provides-extras = ["fastapi", "starlette"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "fastapi", specifier = ">=0.100" },
+    { name = "fastapi", specifier = ">=0.118" },
     { name = "mypy", specifier = ">=1.15.0" },
     { name = "pre-commit", specifier = ">=4.2.0" },
     { name = "pytest", specifier = ">=8.0" },
@@ -32,7 +45,7 @@ dev = [
     { name = "pytest-cov", specifier = ">=6.0" },
     { name = "ruff", specifier = ">=0.15.2" },
     { name = "sse-starlette", specifier = ">=2.0" },
-    { name = "starlette", specifier = ">=0.27" },
+    { name = "starlette", specifier = ">=0.42" },
     { name = "uvloop", specifier = ">=0.21" },
 ]
 

@@ -4,6 +4,10 @@
 
 - **`core.py`** — abstractions and core runtime: `CancelReason`, `CancelType`, `Trigger`, `TriggerHandle`, `Fence`, `_CancelToken`
 - **`triggers/`** — built-in trigger implementations: `TimeoutTrigger`/`TimeoutHandle`, `EventTrigger`/`EventHandle`
+- **`contrib/`** — optional framework integrations (Starlette / FastAPI). Never imported by the core package, so it stays dependency-free; see [api.md](api.md)
+  - **`contrib/middleware.py`** — `DisconnectMiddleware`, the single reader of a request's ASGI receive channel: `_RequestChannel` pumps the channel, replays body messages, latches the disconnect, and publishes the event at `scope["aiofence.disconnect_event"]`
+  - **`contrib/starlette.py`** — `disconnect_event` / `disconnect_fencing` dependencies. They borrow the middleware's event when it is installed, and fall back to their own reference-counted watch when it isn't
+  - **`contrib/fastapi.py`** — `DisconnectEvent` / `DisconnectFencing` annotated aliases
 - **`__init__.py`** — public re-exports
 
 ## API
@@ -20,6 +24,7 @@ For usage guide, examples, and custom trigger documentation see [api.md](api.md)
 
 ## Cancellation Flow
 
+0. `Fence.__enter__` requires a running task — `task.cancel()` is the only mechanism there is. Entered from a loop callback or from a worker thread (a sync FastAPI `def` handler), it raises `RuntimeError`
 1. `Fence.__enter__` snapshots `task.cancelling()` as the baseline counter
 2. Runs `check()` on all triggers — if any pre-triggered, records reasons and schedules `task.cancel()` via `call_soon`
 3. If no pre-triggers, arms all triggers; when one fires, callback records the reason and schedules `task.cancel()` via `call_soon`
@@ -98,6 +103,20 @@ Instead, pre-triggered Fences schedule `task.cancel()` via `call_soon` and let t
 Wire protocol is always relative duration. Each service converts to local timeout:
 - Incoming: `header_seconds` -> `TimeoutTrigger(header_seconds)`
 - Outgoing: `fence.remaining` -> header
+
+## Disconnect Delivery: Replay and Latch
+
+`DisconnectMiddleware` exists because an ASGI receive channel has exactly one useful reader — `receive()` is a queue pop, not a broadcast — while a request routinely has several interested parties: the disconnect dependency, `StreamingResponse`'s `listen_for_disconnect`, sse-starlette's listener, `Request.is_disconnected()`. Whoever reads first consumes the message; on hypercorn, daphne and granian it is delivered exactly once, so everyone else starves. A dependency cannot arbitrate: Starlette captures the raw `receive` before any dependency runs, so there is no reference left to wrap. Only a middleware sits above all of them.
+
+Three properties make the arbitration correct, and each is load-bearing:
+
+- **Replay, don't discard.** The pump forwards every `http.request` message downstream in order and unchanged. The alternative — the dependency's watcher, which discards anything that isn't a disconnect — steals body chunks, and the loser of that race gets `{"body": b"", "more_body": False}`, which Starlette accepts as a *complete, empty* body. Silent truncation, no exception, no log.
+- **Latch, don't queue.** The disconnect is a terminal side channel: recorded once and answered on every later `receive()`, never queued behind body chunks. That turns a one-shot server delivery into a signal every reader below can observe, and it keeps the middleware from needing a bounded queue of its own. Draining the server's queue also matters in itself — hypercorn bounds its app queue at 10 messages and blocks the connection when it fills.
+- **Track `response_complete` in a wrapped `send`.** Per the ASGI spec `http.disconnect` means "the stream ended", not "the client left": every server sends it once the response is complete. The middleware flips its flag *before* handing the terminal message to the server's `send`, because the pump can only be woken by the server having processed that message. A disconnect latched after that point is replayed downstream but does **not** set the event — which is what keeps `BackgroundTasks` and post-response work from being cancelled on every successful request. This is the only place in the stack where the two meanings can be told apart.
+
+The pump stops as soon as it latches a disconnect: uvicorn re-delivers the message immediately and forever, so reading past it would spin for the rest of the request, background-task phase included.
+
+Replay settles that both readers are *told*, not who acts first. A fenced streaming body can therefore outlive its rival listener's cancel scope — `move_on_cancel()` suppressed the cancellation deliberately, so the generator resumes and emits its last chunk.
 
 ## Why This Complexity Is Necessary
 
