@@ -59,6 +59,10 @@ asyncio_mode = "auto"
 [tool.ruff]
 target-version = "py312"
 line-length = 100
+# ruff 0.16 formats Python code blocks in Markdown by default. Docs snippets are
+# laid out for reading (multi-line builder chains, aligned trailing comments), so
+# they stay out of the formatter's reach.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = [
