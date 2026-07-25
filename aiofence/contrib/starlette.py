@@ -23,7 +23,7 @@ async def disconnect_event(request: Request) -> AsyncGenerator[asyncio.Event]:
                 return partial
 
     Holding this event means holding the ASGI receive channel, which rules out
-    raw body reads and streaming responses. See the caveats in docs/api.md.
+    raw body reads and streaming responses. See docs/receive-channel-conflicts.md.
     """
     async with _shared_disconnect_event(request) as event:
         yield event
@@ -50,7 +50,7 @@ async def disconnect_fencing(
                 ...
 
     Holding this fencing means holding the ASGI receive channel, which rules
-    out raw body reads and streaming responses. See the caveats in docs/api.md.
+    out raw body reads and streaming responses. See docs/receive-channel-conflicts.md.
     """
     async with _bound_fencing(request, code) as fencing:
         yield fencing

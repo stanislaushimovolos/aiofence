@@ -349,20 +349,11 @@ router = APIRouter(
 
 Sync (`def`) handlers are not cancellable — FastAPI runs them in a threadpool. The dependency still binds and `fence.cancelled_by(...)` still reports correctly, but nothing interrupts the handler.
 
-### Caveat: don't read the raw body
+### Caveats: the watcher owns the receive channel
 
-While a disconnect fencing is bound, its watcher owns the ASGI receive channel — it loops on `receive()` and discards every message that isn't `http.disconnect`. Reading the raw body inside that window races with it:
+While a disconnect fencing is bound, its watcher loops on `receive()` and discards every message that isn't `http.disconnect`. An ASGI receive channel has only one useful reader, so anything else in the stack that reads it splits the message stream with the watcher. Three consequences:
 
-```python
-@app.post("/upload", dependencies=[Depends(disconnect_fencing)])
-async def handler(request: Request):
-    await something()             # watcher parks in receive() here
-    body = await request.body()   # may hang forever
-```
-
-Whichever call is parked in `receive()` first gets the next message. If the watcher wins, it drops the `http.request` chunk on the floor and the body read waits for data that will never arrive. The outcome depends on scheduling, so this can pass in tests and hang in production — under a real server the watcher is normally parked well before the body arrives over the network.
-
-**FastAPI-parsed body params are safe.** FastAPI reads and caches the body *before* it solves dependencies, so those messages are consumed before the watcher exists. A later `await request.body()` returns the cached bytes without touching `receive()`:
+**Don't read the raw body.** `await request.body()` or `request.stream()` inside a fenced handler races the watcher and can hang. Declare the body as a parameter instead — FastAPI caches it before dependencies run, so a later `request.body()` returns cached bytes:
 
 ```python
 @app.post("/upload", dependencies=[Depends(disconnect_fencing)])
@@ -371,52 +362,8 @@ async def handler(payload: Payload, request: Request):
     body = await request.body()   # cached — safe
 ```
 
-So: declare the body as a parameter. For handlers that must stream the raw body (`request.stream()`, large uploads), don't fence the request — the same limitation applies to `disconnect_fencing` and `disconnect_event` used directly, since they share the one watcher.
+**Streaming responses are unreliable.** Starlette's `StreamingResponse` runs its own disconnect listener when the server declares ASGI `spec_version` below `2.4`. Whether the fence or the stream sees the disconnect depends on scheduling. Servers declaring `2.4` or higher are unaffected.
 
-### Caveat: streaming responses
+**SSE disables sse-starlette's close handling.** `EventSourceResponse` always reads the channel. The watcher wins consistently, so `cancelled_by("disconnect")` works — but `client_close_handler_callable` never runs and pings keep going to a closed socket. If you rely on that handler, leave the endpoint unfenced.
 
-Same root cause, other end of the request. Starlette's `StreamingResponse` reads the receive channel itself: when the server declares ASGI `spec_version` below `2.4`, it runs its own `listen_for_disconnect` loop alongside the body, so a fenced streaming endpoint has two readers competing for the same messages.
-
-```python
-@app.get("/stream", dependencies=[Depends(disconnect_fencing)])
-async def handler():
-    async def body():
-        yield first_chunk
-        with get_current_fencing().move_on_cancel() as fence:
-            await slow_step()      # may or may not be cancelled on disconnect
-        yield second_chunk
-
-    return StreamingResponse(body())
-```
-
-The binding itself is sound. FastAPI tears down `yield` dependencies *after* the response body has finished streaming, so both the `Fencing` context and the watcher stay alive for the whole stream. Only the second reader is a problem, and it resolves one of two ways:
-
-- **The watcher wins** — the disconnect event is set, the fence fires, the body resumes after `move_on_cancel()` and the stream completes. Starlette's listener stays parked forever.
-- **Starlette wins** — the disconnect event is never set, `cancelled_by("disconnect")` stays `False`, and Starlette aborts the stream mid-body through its own cancel scope.
-
-Whichever call reaches `receive()` first wins, which in practice comes down to whether the handler suspended before returning the response — not something to depend on. Servers declaring `spec_version` `2.4` or higher skip Starlette's listener entirely, and the fencing behaves normally there.
-
-### Caveat: server-sent events
-
-`sse-starlette` is the same conflict with the outcome reversed. `EventSourceResponse` runs its `_listen_for_disconnect` loop unconditionally — it deliberately declines Starlette's `2.4` fast path, because that loop also drives `client_close_handler_callable` and clears the `active` flag that stops pings. Its listener is started last, so the watcher wins the channel consistently:
-
-- `cancelled_by("disconnect")` works, and the fence cancels the generator as intended.
-- `client_close_handler_callable` never runs.
-- `active` stays `True`, so pings keep going out to a closed socket until the generator ends on its own.
-
-```python
-@app.get("/tokens", dependencies=[Depends(disconnect_fencing)])
-async def handler():
-    async def events():
-        with get_current_fencing().move_on_cancel() as fence:
-            async for token in llm.stream(prompt):
-                yield token
-        # fence.cancelled_by("disconnect") is True here — but the
-        # EventSourceResponse close handler was never called
-
-    return EventSourceResponse(events(), client_close_handler_callable=on_close)
-```
-
-So fencing an SSE endpoint gets you cancellation while quietly switching off sse-starlette's own disconnect handling. If you depend on the close handler for cleanup, billing, or metrics, leave the endpoint unfenced for now.
-
-Both caveats have the same fix: middleware that owns the channel once and replays the disconnect downstream, so every reader observes it.
+All three have the same fix, which needs middleware rather than a dependency. See [Receive Channel Conflicts](receive-channel-conflicts.md) for the mechanics, evidence, and planned fix.

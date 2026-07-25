@@ -30,7 +30,7 @@ Handlers that never touch the value should skip the parameter and declare
 
 Requires ``fastapi``. For plain Starlette use ``aiofence.contrib.starlette``,
 which these are built from. Both aliases inherit that module's receive-channel
-restrictions — see the caveats in docs/api.md.
+restrictions — see docs/receive-channel-conflicts.md.
 """
 
 from __future__ import annotations

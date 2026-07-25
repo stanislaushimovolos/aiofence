@@ -166,13 +166,14 @@ Requires `starlette` (installed with FastAPI). No additional dependencies.
 - [API Guide](docs/api.md) — usage, patterns, and examples
 - [Architecture](docs/architecture.md) — how it works, cancellation flow, design decisions
 - [Why Suppress](docs/why-suppress.md) — why `CancelledError` is suppressed instead of raised
+- [Receive Channel Conflicts](docs/receive-channel-conflicts.md) — how the disconnect watcher interacts with raw body reads, `StreamingResponse`, and sse-starlette
 - [CPython Task Cancellation](docs/cpython-task-cancellation.md) — how `asyncio.Task` cancellation works under the hood
 
 ## Caveats
 
 **Nested Fences are not supported.** Entering a `Fence` while another is active on the same task raises `RuntimeError`. Use sequential fences or `get_current_fencing()` composition instead. See [#12](https://github.com/stanislaushimovolos/aiofence/issues/12) for details and progress.
 
-**The disconnect dependencies own the ASGI receive channel.** While one is active the handler must not read the raw body, and streaming responses are unreliable — Starlette's `StreamingResponse` and sse-starlette's `EventSourceResponse` read the same channel, and the readers compete. With SSE the fence still works but sse-starlette's own close handler never fires. See the caveats in the [API Guide](docs/api.md#caveat-dont-read-the-raw-body).
+**The disconnect dependencies own the ASGI receive channel.** While one is active the handler must not read the raw body, and streaming responses are unreliable — Starlette's `StreamingResponse` and sse-starlette's `EventSourceResponse` read the same channel, and the readers compete. See [Receive Channel Conflicts](docs/receive-channel-conflicts.md).
 
 ## Requirements
 

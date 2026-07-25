@@ -1,6 +1,7 @@
 """
 sse-starlette's EventSourceResponse runs its own receive loop, so it competes
-with the disconnect watcher for the same channel. See docs/api.md.
+with the disconnect watcher for the same channel. See
+docs/receive-channel-conflicts.md.
 """
 
 from __future__ import annotations
@@ -12,7 +13,6 @@ from contextlib import suppress
 import pytest
 from fastapi import Depends, FastAPI
 from sse_starlette.sse import EventSourceResponse
-from starlette.types import Message
 
 from aiofence import get_current_fencing
 from aiofence.contrib.starlette import disconnect_fencing
@@ -37,13 +37,11 @@ async def _drop_sse_shutdown_watcher() -> AsyncIterator[None]:
             await task
 
 
-def sse_app(*, fenced: bool, closed: list[str], observed: list[bool]) -> FastAPI:
+async def test__sse_response__when_client_disconnects__then_fence_cancelled() -> None:
     app = FastAPI()
+    observed: list[bool] = []
 
-    async def on_close(_: Message) -> None:
-        closed.append("closed")
-
-    @app.get("/work", dependencies=[Depends(disconnect_fencing)] if fenced else [])
+    @app.get("/work", dependencies=[Depends(disconnect_fencing)])
     async def work() -> EventSourceResponse:
         async def events() -> AsyncIterator[str]:
             yield "first"
@@ -52,40 +50,10 @@ def sse_app(*, fenced: bool, closed: list[str], observed: list[bool]) -> FastAPI
             observed.append(fence.cancelled_by("disconnect"))
             yield "second"
 
-        return EventSourceResponse(events(), client_close_handler_callable=on_close, ping=60)
-
-    return app
-
-
-async def test__sse_response__when_fenced__then_fence_observes_disconnect() -> None:
-    closed: list[str] = []
-    observed: list[bool] = []
-    app = sse_app(fenced=True, closed=closed, observed=observed)
+        return EventSourceResponse(events(), ping=60)
 
     body = await call_app_body(app, receive=scripted_receive({"type": "http.disconnect"}))
 
     assert observed == [True]
     assert b"data: first" in body
     assert b"data: second" in body
-
-
-async def test__sse_response__when_fenced__then_sse_close_handler_never_fires() -> None:
-    """Known limitation: the watcher consumes the disconnect before sse-starlette sees it."""
-    closed: list[str] = []
-    observed: list[bool] = []
-    app = sse_app(fenced=True, closed=closed, observed=observed)
-
-    await call_app_body(app, receive=scripted_receive({"type": "http.disconnect"}))
-
-    assert closed == []
-
-
-async def test__sse_response__when_unfenced__then_sse_close_handler_fires() -> None:
-    """Control for the test above — sse-starlette handles disconnect fine on its own."""
-    closed: list[str] = []
-    observed: list[bool] = []
-    app = sse_app(fenced=False, closed=closed, observed=observed)
-
-    await call_app_body(app, receive=scripted_receive({"type": "http.disconnect"}))
-
-    assert closed == ["closed"]
