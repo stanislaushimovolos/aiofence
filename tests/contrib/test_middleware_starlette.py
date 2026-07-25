@@ -322,6 +322,40 @@ async def test__streaming_response__when_spec_is_2_4__then_fencing_sees_disconne
     assert server.response_body == b"start;end;"  # so the body resumes and finishes
 
 
+async def test__streaming_response__when_send_raises_on_2_4__then_fence_sees_disconnect() -> None:
+    """
+    On that branch ``StreamingResponse`` watches nothing and leans entirely on
+    ``send`` failing, which it converts to ``ClientDisconnect``. The suppressed
+    fence lets the generator resume, so its last chunk is what hits the closed
+    connection — and the middleware must have set the event regardless.
+    """
+    server = FakeServer(spec_version="2.4", raise_on_send=True)
+    in_fence = asyncio.Event()
+    fences: list[Fence] = []
+
+    async def body() -> AsyncIterator[bytes]:
+        yield b"start;"
+        with get_current_fencing().move_on_cancel() as fence:
+            fences.append(fence)
+            in_fence.set()
+            await asyncio.sleep(10)
+        yield b"end;"
+
+    stream = body()
+
+    async def endpoint(request: Request) -> Response:
+        return StreamingResponse(stream)
+
+    with pytest.raises(ClientDisconnect):
+        async with serve(starlette_app(endpoint), server):
+            await wait_for(in_fence)
+            server.disconnect()
+
+    await stream.aclose()  # the failed send leaves the generator parked on its last yield
+
+    assert fences[0].cancelled_by("disconnect")
+
+
 @pytest.mark.parametrize(
     "spec_version", ["2.0", "2.3", "2.4", None], ids=["2.0", "2.3", "2.4", "absent"]
 )

@@ -496,11 +496,12 @@ Both the scope key and the context binding are dropped when the request ends, so
 | `BackgroundTasks` on a successful request | cancelled every time — a completed response reads as a disconnect | run normally; the event fires only while the response is unfinished |
 | Raw body reads (`Request`-only handler) | hang, or silently return `b""` | exact bytes, in order, however late they are read |
 | `StreamingResponse` below ASGI spec 2.4 | a race: either the fence fires or Starlette aborts the body | both readers are told |
+| `StreamingResponse` on ASGI spec 2.4 | Starlette watches nothing and waits for a `send` to fail | the fence fires as soon as the client leaves, and a failed `send` sets the event too |
 | sse-starlette `EventSourceResponse` | `client_close_handler_callable` never runs | close handler runs *and* `cancelled_by("disconnect")` is `True` |
 | hypercorn / daphne / granian | they deliver `http.disconnect` once, so the second reader starves | recorded once, replayed to every later read |
 | `BaseHTTPMiddleware` in the stack | masks the false disconnect; can raise into the watcher | one reader, so no reentrancy and no masking |
 
-`http.request` messages are forwarded downstream in order and unchanged, and `http.disconnect` is treated as a terminal side channel — recorded rather than queued, and answered on every later `receive()` once the buffered body has been drained.
+`http.request` messages are forwarded downstream in order and unchanged, and `http.disconnect` is treated as a terminal side channel — recorded rather than queued, and answered on every later `receive()` once the buffered body has been drained. An `OSError` out of `send` — what a spec-2.4 server raises on a closed connection — is recorded the same way and re-raised, so the application still sees it.
 
 What replay settles is that both readers are *told*. Which one acts first is still a scheduling matter, and a fenced body legitimately outlives its rival listener's cancel scope: `move_on_cancel()` suppressed the cancellation on purpose, so the generator resumes and emits its last chunk. An unfenced body is still torn down by the rival listener, as before.
 

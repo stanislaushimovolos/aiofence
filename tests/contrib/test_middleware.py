@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import suppress
 
 import pytest
 from starlette.types import Message, Receive, Scope, Send
@@ -30,6 +31,7 @@ from .asgi_harness import bound_codes
 from .server_harness import (
     DeliveryMode,
     FakeServer,
+    SendError,
     read_body,
     respond,
     run_app,
@@ -319,6 +321,93 @@ async def test__middleware__when_trailers_complete_the_response__then_event_not_
         await wait_until(lambda: server.disconnects_delivered >= 1)
 
     await run_app(DisconnectMiddleware(app), server)
+
+    assert not seen[0].is_set()
+
+
+# --- D18: ASGI 2.4 — send raises once the connection is closed ---
+
+
+def response_start() -> Message:
+    return {"type": "http.response.start", "status": 200, "headers": []}
+
+
+def terminal_body() -> Message:
+    return {"type": "http.response.body", "body": b"ok", "more_body": False}
+
+
+async def test__middleware__when_send_raises_after_client_left__then_event_set() -> None:
+    """
+    The spec warns that ``send`` can fail before ``http.disconnect`` reaches a
+    reader. That message completes the response, so a completion flag left to
+    decide alone would read the disconnect as "stream ended".
+    """
+    server = FakeServer(raise_on_send=True)
+    seen: list[asyncio.Event] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        seen.append(published_event(scope))
+        await send(response_start())
+        server.disconnect()  # nothing is awaited after this, so the read loop stays parked
+        with suppress(OSError):
+            await send(terminal_body())
+
+    await run_app(DisconnectMiddleware(app), server)
+
+    assert seen[0].is_set()
+
+
+async def test__middleware__when_send_raises__then_error_reaches_the_app() -> None:
+    server = FakeServer(raise_on_send=True)
+    caught: list[BaseException] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        await send(response_start())
+        server.disconnect()
+        try:
+            await send(terminal_body())
+        except OSError as exc:
+            caught.append(exc)
+
+    await run_app(DisconnectMiddleware(app), server)
+
+    assert [type(exc) for exc in caught] == [SendError]
+
+
+async def test__middleware__when_send_raises__then_downstream_receive_answers_disconnect() -> None:
+    """
+    The connection is closed and no further body is coming, so a reader below
+    must not park on a server that delivers its disconnect only once.
+    """
+    server = FakeServer(delivery=DeliveryMode.ONCE, raise_on_send=True)
+    seen: list[str] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        await send(response_start())
+        server.disconnect()
+        with suppress(OSError):
+            await send(terminal_body())
+        seen.append((await receive())["type"])
+
+    await run_app(DisconnectMiddleware(app), server)
+
+    assert seen == ["http.disconnect"]
+
+
+async def test__middleware__when_send_fails_without_oserror__then_event_not_set() -> None:
+    """A protocol error out of ``send`` is not evidence the client left."""
+    server = FakeServer()
+    seen: list[asyncio.Event] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        seen.append(published_event(scope))
+        await send(response_start())
+
+    async def failing_send(message: Message) -> None:
+        raise RuntimeError("Unexpected ASGI message")
+
+    with pytest.raises(RuntimeError):
+        await DisconnectMiddleware(app)(server.scope, server.receive, failing_send)
 
     assert not seen[0].is_set()
 

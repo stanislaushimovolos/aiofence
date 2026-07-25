@@ -70,7 +70,8 @@ class _RequestChannel:
     """
     Sole reader of one request's receive channel: ``start`` runs the read loop,
     ``receive`` is what the app below sees, ``wrap_send`` follows the response
-    on its way out, ``aclose`` stops the loop and wakes any waiting consumer.
+    on its way out and catches a connection the server reports closed,
+    ``aclose`` stops the loop and wakes any waiting consumer.
     """
 
     def __init__(self, receive: Receive) -> None:
@@ -133,13 +134,33 @@ class _RequestChannel:
             logger.warning("aiofence receive channel failed and nothing read it: %r", self._failure)
 
     def wrap_send(self, send: Send) -> Send:
-        return self._response.wrap(send)
+        async def watched_send(message: Message) -> None:
+            # Before, not after: the read loop can only wake once the server has
+            # processed this message, and by then the flag must already be set.
+            self._response.advance(message)
+            try:
+                await send(message)
+            except OSError:
+                self._record_send_failure()
+                raise
+
+        return watched_send
 
     def _record_disconnect(self) -> None:
-        self._channel_ended = True
         # After the response's last message every server sends http.disconnect;
         # that means "stream ended", not "client left". Only here can they be told apart.
-        if not self._response.complete:
+        self._end_channel(client_left=not self._response.complete)
+
+    def _record_send_failure(self) -> None:
+        # ASGI spec 2.4: an OSError out of send is the server saying the connection
+        # is closed, and it can arrive before the disconnect message reaches the read
+        # loop. No phase check — nothing follows the response's terminal message, so a
+        # send the server refused is a response the client never got.
+        self._end_channel(client_left=True)
+
+    def _end_channel(self, *, client_left: bool) -> None:
+        self._channel_ended = True
+        if client_left:
             self._disconnect_event.set()
 
         self._wake_waiters()
@@ -166,9 +187,9 @@ class _RequestChannel:
 
 class _ResponsePhase:
     """
-    The send direction, watched only to answer one question: has the response
-    already ended? A disconnect after that point means "stream ended"; before
-    it, the client left.
+    How far the response has got, advanced by the channel's wrapped ``send`` and
+    read to answer one question: had the response already ended? A disconnect
+    after that point means "stream ended"; before it, the client left.
     """
 
     def __init__(self) -> None:
@@ -179,16 +200,7 @@ class _ResponsePhase:
     def complete(self) -> bool:
         return self._complete
 
-    def wrap(self, send: Send) -> Send:
-        async def tracked_send(message: Message) -> None:
-            # Before, not after: the read loop can only wake once the server has
-            # processed this message, and by then the flag must already be set.
-            self._advance(message)
-            await send(message)
-
-        return tracked_send
-
-    def _advance(self, message: Message) -> None:
+    def advance(self, message: Message) -> None:
         if self._complete:
             return
 

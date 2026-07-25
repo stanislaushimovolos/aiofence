@@ -10,6 +10,8 @@ what the four production servers actually do:
 * repeated re-delivery (uvicorn) vs one-shot-then-park (hypercorn, daphne,
   granian)
 * a ``receive`` that raises
+* a ``send`` that raises once the connection is closed (ASGI spec 2.4) as well
+  as one that drops the message silently (every server shipping today)
 * a bounded app queue (hypercorn's ``max_app_queue_size``, default 10)
 * a selectable — or absent — ASGI ``spec_version``
 * the response-trailers extension, where the response is not complete until the
@@ -40,6 +42,13 @@ from .asgi_harness import http_scope, post_scope
 DEFAULT_TIMEOUT = 1.0
 
 
+class SendError(OSError):
+    """
+    The server-specific ``OSError`` subclass ASGI spec 2.4 asks a server to
+    raise from ``send`` once the connection is closed.
+    """
+
+
 class DeliveryMode(StrEnum):
     """How the server hands out ``http.disconnect``."""
 
@@ -63,6 +72,9 @@ class FakeServer:
         max_queue_size: Bound on undelivered ``http.request`` messages.
             ``feed_body`` blocks while the bound is reached, like hypercorn.
         error: Raised by ``receive`` from the ``error_after``-th call on.
+        raise_on_send: Raise ``SendError`` from ``send`` once the client is
+            gone, the way a spec-2.4 server does. Servers below that version —
+            every one shipping today — drop the message silently instead.
     """
 
     def __init__(  # noqa: PLR0913
@@ -78,6 +90,7 @@ class FakeServer:
         error: BaseException | None = None,
         error_after: int = 1,
         content_length: int | None = None,
+        raise_on_send: bool = False,
     ) -> None:
         chunks = [body] if isinstance(body, bytes) else list(body)
         self.scope = _build_scope(
@@ -96,6 +109,7 @@ class FakeServer:
 
         self._delivery = delivery
         self._max_queue_size = max_queue_size
+        self._raise_on_send = raise_on_send
         self._error = error
         self._error_after = error_after
         self._client_gone = False
@@ -126,6 +140,9 @@ class FakeServer:
             await self._wait()
 
     async def send(self, message: Message) -> None:
+        if self._raise_on_send and self._client_gone:
+            raise SendError("connection closed")
+
         self.sent.append(message)
         match message["type"]:
             case "http.response.start":
