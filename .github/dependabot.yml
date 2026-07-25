@@ -17,6 +17,11 @@ updates:
     commit-message:
       prefix: "chore"
     groups:
+      # Dependabot's uv support classifies every dependency as "production",
+      # so `dependency-type: development` matches nothing here — group by name
+      # and keep the contrib floors out so each gets its own reviewable PR.
       dev-dependencies:
-        dependency-type: "development"
         patterns: ["*"]
+        exclude-patterns:
+          - "fastapi"
+          - "starlette"

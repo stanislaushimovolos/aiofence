@@ -105,15 +105,24 @@ them by number; the full reproductions are in git history at `4e6f414`.
 - **D16 residue**, all server-internal: uvicorn 0.43–0.44 waking every parked reader on
   shutdown, granian h2 sharing one `notify_one()` across streams on a connection, and granian
   dropping a materialized chunk when a parked reader is cancelled.
-- **Untestable here**, needing a real server or another event loop: D9 reentrancy via user
-  middleware that reads the body after `call_next`, D14 under Trio, and D17 against a server
-  that actually implements the trailers extension.
+- **Untestable here**, needing another event loop or a server nobody ships: D9 reentrancy via
+  user middleware that reads the body after `call_next`, D14 under Trio, and D17 against a
+  server that actually implements the trailers extension. `tests/contrib/live` now removes the
+  "real server" half of that blocker; D9 is reachable there and simply not written yet.
 
 ## Environment
 
 Python 3.12 · Starlette 0.52.1 · FastAPI 0.140.0 · anyio 4.12.1 · sse-starlette 3.4.6.
 Server behaviour cross-checked against uvicorn 0.51.0, hypercorn 0.18.0, daphne 4.2.3,
 granian 2.7.9, and the ASGI HTTP spec.
+
+The uvicorn and hypercorn halves of that reading are no longer only a reading. `tests/contrib/live`
+runs both servers in-process over a real socket, and `test_server_contract.py` asserts the two
+things `FakeServer` is built on: hypercorn delivers `http.disconnect` once where uvicorn repeats
+it, and neither advertises `spec_version` 2.4. A release that changes either fails there, instead
+of leaving the fake quietly modelling a server that no longer exists. Everything else in that
+directory is end-to-end — a real TCP abort, real chunked framing, the real ordering between a
+completed response and the disconnect that follows it. daphne and granian stay source-read only.
 
 No server advertises HTTP `spec_version` 2.4 today — uvicorn raised `ClientDisconnected` from
 `send` in 0.27.0/0.28.0, reverted it in 0.28.1 and dropped back to 2.3 in 0.32.1; hypercorn

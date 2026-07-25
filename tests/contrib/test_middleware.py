@@ -412,6 +412,70 @@ async def test__middleware__when_send_fails_without_oserror__then_event_not_set(
     assert not seen[0].is_set()
 
 
+# --- response completion: pathsend, and completion as a latch ---
+
+
+def pathsend() -> Message:
+    return {"type": "http.response.pathsend", "path": "/srv/static/report.pdf"}
+
+
+async def test__middleware__when_pathsend_completes_the_response__then_event_not_set() -> None:
+    """``http.response.pathsend`` ends the response in place of a body message."""
+    server = FakeServer()
+    seen: list[asyncio.Event] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        seen.append(published_event(scope))
+        await send(response_start())
+        await send(pathsend())
+        await wait_until(lambda: server.disconnects_delivered >= 1)
+
+    await run_app(DisconnectMiddleware(app), server)
+
+    assert not seen[0].is_set()
+
+
+async def test__middleware__when_pathsend_still_owes_trailers__then_event_set() -> None:
+    server = FakeServer()
+    seen: list[asyncio.Event] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        seen.append(published_event(scope))
+        await send(start_with_trailers())
+        await send(pathsend())
+        server.disconnect()  # the client leaves while the trailers are still owed
+        await wait_until(lambda: server.disconnects_delivered >= 1)
+        await send({"type": "http.response.trailers", "headers": [], "more_trailers": False})
+
+    await run_app(DisconnectMiddleware(app), server)
+
+    assert seen[0].is_set()
+
+
+async def test__middleware__when_message_follows_the_completed_response__then_event_not_set() -> (
+    None
+):
+    """
+    Completion is a latch: a message sent past the end of the response — here
+    trailers that were never promised — cannot reopen it and turn the server's
+    "stream ended" disconnect into a client that left.
+    """
+    server = FakeServer()
+    seen: list[asyncio.Event] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        seen.append(published_event(scope))
+        await send(response_start())
+        await send(terminal_body())
+        await send({"type": "http.response.trailers", "headers": [], "more_trailers": True})
+        server.disconnect()
+        await wait_until(lambda: server.disconnects_delivered >= 1)
+
+    await run_app(DisconnectMiddleware(app), server)
+
+    assert not seen[0].is_set()
+
+
 # --- D5: body chunks are forwarded, not discarded ---
 
 
