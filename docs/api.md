@@ -545,6 +545,65 @@ async def finalize_upload(chunks):
 
 That keeps the decision visible in the code that cares about it, and leaves every other fence in the request disconnect-aware.
 
+#### Choosing what to watch
+
+By default every http request is watched. `watch` is a predicate — one knob rather than an include list and an exclude list — asked once per request, before the application runs:
+
+```python
+def watch(scope: Scope) -> bool:
+    return not scope["path"].startswith("/upload/")     # exempt the buffering routes
+
+app = FastAPI(middleware=[Middleware(DisconnectMiddleware, watch=watch)])
+```
+
+It is asked *before* the router, which is the constraint to design around: **there is no route in the scope yet.** `scope["path"]` is the raw request path — `/items/42`, never the `/items/{id}` template — along with `method`, `headers`, `query_string` and the rest of the request. Only [`on_disconnect`](#reporting-a-disconnect) sees `route`, because it runs after the app returned. Matching paths here therefore means regexes that restate your route table and drift from it silently; prefer a rule that doesn't, like a path prefix you also mount under.
+
+That timing is not an implementation gap. Ownership of the channel cannot be retrofitted — by the time a handler asks for the event, the first `receive()` may already have been consumed by someone else — so the decision has to be made before anything below runs, and there is nothing to decide later.
+
+The predicate is only asked about requests this instance would otherwise take: non-http scopes and a request an outer instance already published are settled first, so a predicate never has to guard `scope["type"]`. Raising from it propagates — nothing has been sent yet, and guessing an answer either way is worse than a 500 that names the bug.
+
+**Declining is total.** That request gets no event, no scope key and no fencing binding, so `get_disconnect_event()` returns `None`, `require_disconnect_event()` raises, and `get_current_fencing().move_on_cancel()` in that handler is simply not disconnect-aware — with no error to notice. The `RuntimeError` says so, but only after the fact:
+
+```
+RuntimeError: aiofence disconnect signalling requires DisconnectMiddleware. Install it
+outermost: ... If it is installed, its watch predicate declined this request.
+```
+
+So two things are worth checking before reaching for it:
+
+- **If the goal is "this work must survive the client leaving"**, you don't want `watch` — you want [a fresh `Fencing()`](#the-middlewares-own-binding) at the work that must outlive the request. That keeps the decision next to the code it concerns, and every other fence in the request stays disconnect-aware.
+- **If the goal is "only a few routes should pay for this at all"**, mounting is stronger than a predicate: install the middleware on the sub-application rather than app-wide. Nothing above a `Mount` reads the channel, so ownership is intact when it runs, and the boundary is structural instead of a pattern that can drift.
+
+  ```python
+  stream = FastAPI()
+  stream.add_middleware(DisconnectMiddleware)   # owns the channel for this subtree only
+  app.mount("/stream", stream)
+  ```
+
+`watch` earns its place when the rule isn't a subtree — a method, a header, a content length, a feature flag read per request.
+
+#### Reporting a disconnect
+
+`on_disconnect` is a callback — sync or async — for logging and metrics. It is called with the ASGI scope once a request the client left has finished, and not at all on the happy path: a completed response never sets the event, so the hook needs no filter of its own.
+
+```python
+from starlette.types import Scope
+from aiofence.contrib.starlette import DisconnectMiddleware
+
+def client_left(scope: Scope) -> None:
+    DISCONNECTS.labels(route=scope["route"].path, method=scope["method"]).inc()
+
+app = FastAPI(middleware=[Middleware(DisconnectMiddleware, on_disconnect=client_left)])
+```
+
+`DisconnectCallback` — `Callable[[Scope], Awaitable[None] | None]` — is exported alongside it, for annotating a callback you pass around rather than define inline.
+
+It runs *after* the app returned, so routing has already filled the scope in place: `endpoint` and `path_params` from Starlette, plus `route` under FastAPI — and `route.path` is the **template** (`/items/{id}`), not the request path (`/items/42`), which is the label a metric wants. `scope["path"]` is still the raw path if you want that instead; `Mount` rewrites `root_path`, never `path`, so it stays the full request path for the request's lifetime.
+
+Two boundaries are deliberate. The hook is *not* handed the event — being called is the signal, and by then the reader is gone, so the published copies have already been dropped. And an exception out of the hook is logged at `ERROR` on the `aiofence.contrib.starlette` logger rather than propagated: the response has already gone out, and a broken metrics backend must not turn a served request into a failed one.
+
+A channel that *failed* is not a disconnect — `receive` raising means the transport broke, which is [not evidence the client left](#when-the-channel-fails) — so the hook does not fire there. A `send` that raises `OSError` is the opposite case: the server reporting a closed connection, which sets the event and does fire the hook.
+
 #### What it costs
 
 - **One task per request** — the channel reader.

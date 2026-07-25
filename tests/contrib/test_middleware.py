@@ -959,3 +959,301 @@ async def test__middleware__when_request_ends__then_fencing_binding_released() -
     await run_app(DisconnectMiddleware(app), FakeServer())
 
     assert bound_codes() == []
+
+
+# --- on_disconnect hook ---
+
+
+async def test__on_disconnect__when_client_leaves_before_response__then_called_with_scope() -> None:
+    server = FakeServer()
+    entered = asyncio.Event()
+    notified: list[Scope] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        entered.set()
+        await wait_for(published_event(scope))
+        await respond(send)
+
+    async def hook(scope: Scope) -> None:
+        notified.append(scope)
+
+    middleware = DisconnectMiddleware(app, on_disconnect=hook)
+    async with serve(middleware, server):
+        await wait_for(entered)
+        server.disconnect()
+
+    assert [scope["path"] for scope in notified] == ["/work"]
+
+
+async def test__on_disconnect__when_response_completes__then_not_called() -> None:
+    notified: list[Scope] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        await respond(send)
+
+    async def hook(scope: Scope) -> None:
+        notified.append(scope)
+
+    await run_app(DisconnectMiddleware(app, on_disconnect=hook), FakeServer())
+
+    assert notified == []
+
+
+async def test__on_disconnect__when_hook_is_sync__then_called() -> None:
+    server = FakeServer()
+    entered = asyncio.Event()
+    notified: list[Scope] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        entered.set()
+        await wait_for(published_event(scope))
+
+    async with serve(DisconnectMiddleware(app, on_disconnect=notified.append), server):
+        await wait_for(entered)
+        server.disconnect()
+
+    assert len(notified) == 1
+
+
+async def test__on_disconnect__when_hook_raises__then_response_intact() -> None:
+    server = FakeServer()
+    entered = asyncio.Event()
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        entered.set()
+        await wait_for(published_event(scope))
+        await respond(send, b"payload")
+
+    def hook(scope: Scope) -> None:
+        raise RuntimeError("metrics down")
+
+    async with serve(DisconnectMiddleware(app, on_disconnect=hook), server):
+        await wait_for(entered)
+        server.disconnect()
+
+    assert server.status == 200
+
+
+async def test__on_disconnect__when_hook_raises__then_error_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    server = FakeServer()
+    entered = asyncio.Event()
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        entered.set()
+        await wait_for(published_event(scope))
+
+    def hook(scope: Scope) -> None:
+        raise RuntimeError("metrics down")
+
+    with caplog.at_level(logging.ERROR, logger="aiofence.contrib.starlette"):
+        async with serve(DisconnectMiddleware(app, on_disconnect=hook), server):
+            await wait_for(entered)
+            server.disconnect()
+
+    assert [r.levelno for r in caplog.records] == [logging.ERROR]
+
+
+async def test__on_disconnect__when_app_raises_after_disconnect__then_called() -> None:
+    server = FakeServer()
+    entered = asyncio.Event()
+    notified: list[Scope] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        entered.set()
+        await wait_for(published_event(scope))
+        raise ValueError("ORIGINAL")
+
+    async def hook(scope: Scope) -> None:
+        notified.append(scope)
+
+    with pytest.raises(ValueError, match="ORIGINAL"):
+        async with serve(DisconnectMiddleware(app, on_disconnect=hook), server):
+            await wait_for(entered)
+            server.disconnect()
+
+    assert len(notified) == 1
+
+
+async def test__on_disconnect__when_receive_raises__then_not_called() -> None:
+    """A broken channel is not evidence the client left."""
+    notified: list[Scope] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        await asyncio.sleep(0.01)
+        await respond(send)
+
+    middleware = DisconnectMiddleware(app, on_disconnect=notified.append)
+    await run_app(middleware, FakeServer(error=RuntimeError("channel")))
+
+    assert notified == []
+
+
+async def test__on_disconnect__when_send_raises_after_client_left__then_called() -> None:
+    server = FakeServer(raise_on_send=True)
+    entered = asyncio.Event()
+    notified: list[Scope] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        entered.set()
+        server.disconnect()
+        await asyncio.sleep(0)
+        with suppress(SendError):
+            await respond(send)
+
+    async with serve(DisconnectMiddleware(app, on_disconnect=notified.append), server):
+        await wait_for(entered)
+
+    assert len(notified) == 1
+
+
+# --- watch predicate ---
+
+
+async def test__watch__when_predicate_accepts__then_request_watched() -> None:
+    published: list[bool] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        published.append(DISCONNECT_EVENT_SCOPE_KEY in scope)
+        await respond(send)
+
+    await run_app(DisconnectMiddleware(app, watch=lambda scope: True), FakeServer())
+
+    assert published == [True]
+
+
+async def test__watch__when_predicate_declines__then_channel_passed_through() -> None:
+    server = FakeServer()
+    seen: dict[str, object] = {}
+
+    async def app(scope: Scope, inner_receive: Receive, inner_send: Send) -> None:
+        seen["receive"] = inner_receive
+        seen["published"] = DISCONNECT_EVENT_SCOPE_KEY in scope
+        await respond(inner_send)
+
+    await run_app(DisconnectMiddleware(app, watch=lambda scope: False), server)
+
+    assert seen == {"receive": server.receive, "published": False}
+
+
+async def test__watch__when_predicate_declines__then_no_fencing_binding() -> None:
+    codes: list[list[str | None]] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        codes.append(bound_codes())
+        await respond(send)
+
+    await run_app(DisconnectMiddleware(app, watch=lambda scope: False), FakeServer())
+
+    assert codes == [[]]
+
+
+async def test__watch__when_omitted__then_every_http_request_watched() -> None:
+    published: list[bool] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        published.append(DISCONNECT_EVENT_SCOPE_KEY in scope)
+        await respond(send)
+
+    await run_app(DisconnectMiddleware(app), FakeServer(path="/anything"))
+
+    assert published == [True]
+
+
+async def test__watch__when_called__then_receives_the_request_scope() -> None:
+    asked: list[tuple[str, str]] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        await respond(send)
+
+    def watch(scope: Scope) -> bool:
+        asked.append((scope["method"], scope["path"]))
+        return True
+
+    await run_app(DisconnectMiddleware(app, watch=watch), FakeServer(path="/stream/42"))
+
+    assert asked == [("GET", "/stream/42")]
+
+
+async def test__watch__when_non_http_scope__then_predicate_not_called() -> None:
+    """Scope type is settled first, so a predicate never has to guard it."""
+    asked: list[Scope] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        return
+
+    async def receive() -> Message:
+        return {"type": "lifespan.shutdown"}
+
+    async def send(message: Message) -> None:
+        return
+
+    def watch(scope: Scope) -> bool:
+        asked.append(scope)
+        return True
+
+    middleware = DisconnectMiddleware(app, watch=watch)
+    async with asyncio.timeout(1):
+        await middleware({"type": "lifespan"}, receive, send)
+
+    assert asked == []
+
+
+async def test__watch__when_already_published__then_predicate_not_called() -> None:
+    """The outer instance already owns the channel; the inner one has no say."""
+    asked: list[Scope] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        await respond(send)
+
+    def watch(scope: Scope) -> bool:
+        asked.append(scope)
+        return True
+
+    inner = DisconnectMiddleware(app, watch=watch)
+    await run_app(DisconnectMiddleware(inner), FakeServer())
+
+    assert asked == []
+
+
+async def test__watch__when_predicate_raises__then_error_propagates() -> None:
+    """Ownership is load-bearing — a broken predicate is not silently answered."""
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        await respond(send)
+
+    def watch(scope: Scope) -> bool:
+        raise RuntimeError("BROKEN PREDICATE")
+
+    with pytest.raises(RuntimeError, match="BROKEN PREDICATE"):
+        await run_app(DisconnectMiddleware(app, watch=watch), FakeServer())
+
+
+async def test__watch__when_predicate_declines__then_on_disconnect_not_called() -> None:
+    notified: list[Scope] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        await respond(send)
+
+    middleware = DisconnectMiddleware(app, watch=lambda scope: False, on_disconnect=notified.append)
+    await run_app(middleware, FakeServer())
+
+    assert notified == []
+
+
+async def test__require_disconnect_event__when_watch_declined__then_error_names_the_predicate() -> (
+    None
+):
+    caught: list[str] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            require_disconnect_event(scope)
+        except RuntimeError as exc:
+            caught.append(str(exc))
+        await respond(send)
+
+    await run_app(DisconnectMiddleware(app, watch=lambda scope: False), FakeServer())
+
+    assert "watch" in caught[0]

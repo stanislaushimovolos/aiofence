@@ -15,7 +15,9 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import deque
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from inspect import isawaitable
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -24,6 +26,12 @@ from aiofence import bind_fencing, get_current_fencing
 from .api import DISCONNECT_CODE, DISCONNECT_EVENT_SCOPE_KEY, _publish
 
 logger = logging.getLogger("aiofence.contrib.starlette")
+
+# Called with the ASGI scope after a client left mid-request; sync or async.
+type DisconnectCallback = Callable[[Scope], Awaitable[None] | None]
+
+# Asked once per http request, before it runs: own this channel or stand aside?
+type WatchPredicate = Callable[[Scope], bool]
 
 
 class DisconnectMiddleware:
@@ -36,16 +44,40 @@ class DisconnectMiddleware:
             ``get_current_fencing().event(event, code=fencing_code)``, for the
             whole request. Defaults to ``DISCONNECT_CODE``, which is what
             ``disconnect_fencing`` uses too — the two dedupe onto one entry.
+        on_disconnect: Sync or async callback for logging and metrics, called
+            with the ASGI scope once a request the client left has finished.
+            It runs after routing, so the scope carries ``endpoint``,
+            ``path_params`` and — under FastAPI — ``route``, whose ``path`` is
+            the template rather than the request path. A completed response is
+            never a disconnect, so it does not fire on the happy path. Raising
+            from it is logged, not propagated.
+        watch: Decides per request whether to own its channel. Asked only about
+            http requests this instance would otherwise take, before the
+            application runs — ownership cannot be retrofitted, so there is
+            nothing to decide later. Declining costs a request its event, its
+            fencing binding and everything read through them, so the default
+            watches every request. Raising from it is propagated: nothing has
+            been sent yet, and guessing an answer would be worse.
     """
 
-    def __init__(self, app: ASGIApp, *, fencing_code: str = DISCONNECT_CODE) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        fencing_code: str = DISCONNECT_CODE,
+        on_disconnect: DisconnectCallback | None = None,
+        watch: WatchPredicate | None = None,
+    ) -> None:
         self.app = app
         self.fencing_code = fencing_code
+        self.on_disconnect = on_disconnect
+        self.watch: WatchPredicate = watch or _watch_every_request
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         # Non-http scopes answer their own disconnect forever; a second install
         # would be a second reader. Both pass through — one reader, one event.
-        if scope["type"] != "http" or DISCONNECT_EVENT_SCOPE_KEY in scope:
+        # Neither is the predicate's call, so both are settled before it is asked.
+        if scope["type"] != "http" or DISCONNECT_EVENT_SCOPE_KEY in scope or not self.watch(scope):
             await self.app(scope, receive, send)
             return
 
@@ -56,6 +88,22 @@ class DisconnectMiddleware:
                 await self._call_app(scope, channel, send)
         finally:
             await channel.aclose()
+            # Only a client that left sets the event, so it is the whole
+            # condition — a completed response never reaches here set.
+            if channel.disconnect_event.is_set():
+                await self._notify(scope)
+
+    async def _notify(self, scope: Scope) -> None:
+        if self.on_disconnect is None:
+            return
+
+        try:
+            outcome = self.on_disconnect(scope)
+            if isawaitable(outcome):
+                await outcome
+        except Exception:
+            # The response has already gone out; observability must not break it.
+            logger.exception("aiofence on_disconnect callback failed")
 
     async def _call_app(self, scope: Scope, channel: _RequestChannel, send: Send) -> None:
         # Ambient, so a bare Fence below is disconnect-aware and exception
@@ -64,6 +112,10 @@ class DisconnectMiddleware:
         fencing = get_current_fencing().event(channel.disconnect_event, code=self.fencing_code)
         with bind_fencing(fencing):
             await self.app(scope, channel.receive, channel.wrap_send(send))
+
+
+def _watch_every_request(scope: Scope) -> bool:  # noqa: ARG001
+    return True
 
 
 class _RequestChannel:

@@ -69,5 +69,6 @@ _CURRENT_EVENT: ContextVar[asyncio.Event | None] = ContextVar(
 _MISSING_MIDDLEWARE = (
     "aiofence disconnect signalling requires DisconnectMiddleware. Install it "
     "outermost: FastAPI(middleware=[Middleware(DisconnectMiddleware)]) or, "
-    "equivalently, as the last app.add_middleware(DisconnectMiddleware) call."
+    "equivalently, as the last app.add_middleware(DisconnectMiddleware) call. "
+    "If it is installed, its watch predicate declined this request."
 )

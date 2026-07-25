@@ -14,12 +14,14 @@ from .api import (
     get_disconnect_event,
     require_disconnect_event,
 )
-from .middleware import DisconnectMiddleware
+from .middleware import DisconnectCallback, DisconnectMiddleware, WatchPredicate
 
 __all__ = [
     "DISCONNECT_CODE",
     "DISCONNECT_EVENT_SCOPE_KEY",
+    "DisconnectCallback",
     "DisconnectMiddleware",
+    "WatchPredicate",
     "get_disconnect_event",
     "require_disconnect_event",
 ]
