@@ -27,6 +27,7 @@ path = "aiofence/__version__.py"
 
 [dependency-groups]
 dev = [
+    "fastapi>=0.100",
     "mypy>=1.15.0",
     "pre-commit>=4.2.0",
     "pytest>=8.0",

@@ -240,19 +240,35 @@ with Fence(TimeoutTrigger(5), EventTrigger(shutdown, code="shutdown")) as fence:
 `aiofence.contrib.starlette` provides a FastAPI dependency that cancels the current `Fencing` when the client disconnects.
 
 ```python
-from fastapi import Depends, FastAPI
-from aiofence import Fencing
-from aiofence.contrib.starlette import disconnect_fencing
+from fastapi import FastAPI
+from aiofence.contrib.fastapi import DisconnectFencing
 
 app = FastAPI()
 
 @app.get("/work")
-async def handler(fencing: Fencing = Depends(disconnect_fencing)):
+async def handler(fencing: DisconnectFencing):
     with fencing.move_on_cancel() as fence:
         await long_work()
 
     if fence.cancelled_by("disconnect"):
         return Response(status_code=499)
+```
+
+`DisconnectFencing` is an alias for `Annotated[Fencing, Depends(disconnect_fencing)]`, from `aiofence.contrib.fastapi` (requires `fastapi`). `aiofence.contrib.starlette` holds the dependencies themselves and works with plain Starlette.
+
+There is a matching `DisconnectEvent` — `Annotated[asyncio.Event, Depends(disconnect_event)]` — for handlers that want to pick their own stopping point rather than be cancelled:
+
+```python
+from aiofence.contrib.fastapi import DisconnectEvent
+
+@app.get("/search")
+async def handler(gone: DisconnectEvent):
+    hits = []
+    for shard in shards:
+        if gone.is_set():
+            break
+        hits += await query(shard)
+    return hits
 ```
 
 `disconnect_fencing` does three things:
@@ -261,13 +277,15 @@ async def handler(fencing: Fencing = Depends(disconnect_fencing)):
 2. Adds it to `get_current_fencing()` with `code="disconnect"` (or a custom code)
 3. Binds the result as the active `Fencing` context via `bind_fencing()`
 
+The disconnect event is created once per request and cached in the ASGI scope, so `disconnect_fencing` and `disconnect_event` can be combined on the same endpoint — they share a single receive loop. Two independent loops would steal each other's messages, and only one of them would see the disconnect.
+
 ### Composing with other triggers
 
 The returned `Fencing` inherits from the current context, so you can chain additional triggers:
 
 ```python
 @app.get("/work")
-async def handler(fencing: Fencing = Depends(disconnect_fencing)):
+async def handler(fencing: DisconnectFencing):
     with fencing.timeout(30, code="budget").move_on_cancel() as fence:
         await long_work()
 
@@ -281,7 +299,7 @@ Inner code can also access the disconnect trigger via `get_current_fencing()`:
 
 ```python
 @app.get("/work")
-async def handler(fencing: Fencing = Depends(disconnect_fencing)):
+async def handler(fencing: DisconnectFencing):
     await process()
 
 async def process():
@@ -291,9 +309,91 @@ async def process():
 
 ### Custom disconnect code
 
+`disconnect_fencing_dependency` builds a dependency with a different code:
+
 ```python
-async def handler(
-    fencing: Fencing = Depends(lambda r: disconnect_fencing(r, code="client_gone")),
-):
+from aiofence.contrib.starlette import disconnect_fencing_dependency
+
+ClientGone = Annotated[Fencing, Depends(disconnect_fencing_dependency(code="client_gone"))]
+
+@app.get("/work")
+async def handler(fencing: ClientGone):
     ...
 ```
+
+### Without a handler parameter
+
+Most handlers never touch the returned `Fencing` — they read it from the context with `get_current_fencing()`. Use FastAPI's `dependencies=[...]`, which runs a dependency and discards its value:
+
+```python
+from aiofence import get_current_fencing
+
+@app.get("/work", dependencies=[Depends(disconnect_fencing)])
+async def handler():
+    with get_current_fencing().move_on_cancel() as fence:
+        await long_work()
+
+    if fence.cancelled_by("disconnect"):
+        return Response(status_code=499)
+```
+
+The same works per-router and app-wide, which is usually what you want — declare it once at the boundary instead of on every route:
+
+```python
+app = FastAPI(dependencies=[Depends(disconnect_fencing)])
+
+router = APIRouter(
+    dependencies=[Depends(disconnect_fencing_dependency(code="client_gone"))],
+)
+```
+
+Sync (`def`) handlers are not cancellable — FastAPI runs them in a threadpool. The dependency still binds and `fence.cancelled_by(...)` still reports correctly, but nothing interrupts the handler.
+
+### Caveat: don't read the raw body
+
+While a disconnect fencing is bound, its watcher owns the ASGI receive channel — it loops on `receive()` and discards every message that isn't `http.disconnect`. Reading the raw body inside that window races with it:
+
+```python
+@app.post("/upload", dependencies=[Depends(disconnect_fencing)])
+async def handler(request: Request):
+    await something()             # watcher parks in receive() here
+    body = await request.body()   # may hang forever
+```
+
+Whichever call is parked in `receive()` first gets the next message. If the watcher wins, it drops the `http.request` chunk on the floor and the body read waits for data that will never arrive. The outcome depends on scheduling, so this can pass in tests and hang in production — under a real server the watcher is normally parked well before the body arrives over the network.
+
+**FastAPI-parsed body params are safe.** FastAPI reads and caches the body *before* it solves dependencies, so those messages are consumed before the watcher exists. A later `await request.body()` returns the cached bytes without touching `receive()`:
+
+```python
+@app.post("/upload", dependencies=[Depends(disconnect_fencing)])
+async def handler(payload: Payload, request: Request):
+    await something()
+    body = await request.body()   # cached — safe
+```
+
+So: declare the body as a parameter. For handlers that must stream the raw body (`request.stream()`, large uploads), don't fence the request — the same limitation applies to `disconnect_fencing` and `disconnect_event` used directly, since they share the one watcher.
+
+### Caveat: streaming responses
+
+Same root cause, other end of the request. Starlette's `StreamingResponse` reads the receive channel itself: when the server declares ASGI `spec_version` below `2.4`, it runs its own `listen_for_disconnect` loop alongside the body, so a fenced streaming endpoint has two readers competing for the same messages.
+
+```python
+@app.get("/stream", dependencies=[Depends(disconnect_fencing)])
+async def handler():
+    async def body():
+        yield first_chunk
+        with get_current_fencing().move_on_cancel() as fence:
+            await slow_step()      # may or may not be cancelled on disconnect
+        yield second_chunk
+
+    return StreamingResponse(body())
+```
+
+The binding itself is sound. FastAPI tears down `yield` dependencies *after* the response body has finished streaming, so both the `Fencing` context and the watcher stay alive for the whole stream. Only the second reader is a problem, and it resolves one of two ways:
+
+- **The watcher wins** — the disconnect event is set, the fence fires, the body resumes after `move_on_cancel()` and the stream completes. Starlette's listener stays parked forever.
+- **Starlette wins** — the disconnect event is never set, `cancelled_by("disconnect")` stays `False`, and Starlette aborts the stream mid-body through its own cancel scope.
+
+Whichever call reaches `receive()` first wins, which in practice comes down to whether the handler suspended before returning the response — not something to depend on. Servers declaring `spec_version` `2.4` or higher skip Starlette's listener entirely, and the fencing behaves normally there.
+
+For now, don't fence streaming endpoints. A proper fix needs middleware that owns the channel once and replays the disconnect downstream, so both readers see it.

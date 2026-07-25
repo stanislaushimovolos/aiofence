@@ -120,10 +120,10 @@ elif fence.cancelled_by("budget"):
 `disconnect_fencing` binds a client-disconnect trigger to the current `Fencing` context via `bind_fencing()`. When the client disconnects, any active `Fence` — anywhere in the call stack — is cancelled with `code="disconnect"`:
 
 ```python
-from aiofence.contrib.starlette import disconnect_fencing
+from aiofence.contrib.fastapi import DisconnectFencing
 
 @app.get("/work")
-async def handler(fencing: Fencing = Depends(disconnect_fencing)):
+async def handler(fencing: DisconnectFencing):
     with fencing.timeout(30, code="budget").move_on_cancel() as fence:
         await long_work()
 
@@ -137,11 +137,8 @@ The real value is that `disconnect_fencing` calls `bind_fencing()` internally, s
 from aiofence.contrib.starlette import disconnect_fencing
 
 # handler — declares cancellation sources at the boundary
-@app.get("/generate")
-async def handler(
-    prompt: str,
-    _ = Depends(disconnect_fencing),
-):
+@app.get("/generate", dependencies=[Depends(disconnect_fencing)])
+async def handler(prompt: str):
     result = await generate_response(prompt)
     return {"status": "ok", "result": result}
 
@@ -174,6 +171,8 @@ Requires `starlette` (installed with FastAPI). No additional dependencies.
 ## Caveats
 
 **Nested Fences are not supported.** Entering a `Fence` while another is active on the same task raises `RuntimeError`. Use sequential fences or `get_current_fencing()` composition instead. See [#12](https://github.com/stanislaushimovolos/aiofence/issues/12) for details and progress.
+
+**The disconnect dependencies own the ASGI receive channel.** While one is active the handler must not read the raw body, and streaming responses are unreliable — Starlette's `StreamingResponse` reads the same channel and the two compete. See the caveats in the [API Guide](docs/api.md#caveat-dont-read-the-raw-body).
 
 ## Requirements
 

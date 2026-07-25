@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator
+from typing import Any
 
 from aiofence import Fencing, bind_fencing, get_current_fencing
 from aiofence.contrib.starlette import disconnect_event, disconnect_fencing
@@ -11,9 +12,12 @@ class MockRequest:
     """Simulates a Starlette Request backed by an asyncio.Queue."""
 
     def __init__(self) -> None:
+        self.scope: dict[str, Any] = {"type": "http"}
         self._queue: asyncio.Queue[dict[str, str]] = asyncio.Queue()
+        self.receive_calls = 0
 
     async def receive(self) -> dict[str, str]:
+        self.receive_calls += 1
         return await self._queue.get()
 
     def disconnect(self) -> None:
@@ -44,6 +48,39 @@ async def test__disconnect_event__when_body_completes__then_listener_cleaned_up(
     async for event in disconnect_event(request):  # type: ignore[arg-type]
         await asyncio.sleep(0)
         assert not event.is_set()
+
+
+# --- shared per-request watcher ---
+
+
+async def test__disconnect_event__when_used_twice__then_same_event_reused() -> None:
+    request = MockRequest()
+
+    async for outer in disconnect_event(request):  # type: ignore[arg-type]
+        async for inner in disconnect_event(request):  # type: ignore[arg-type]
+            assert inner is outer
+
+
+async def test__disconnect_event__when_used_twice__then_single_receive_loop() -> None:
+    request = MockRequest()
+
+    async for _ in disconnect_event(request):  # type: ignore[arg-type]
+        async for _ in disconnect_event(request):  # type: ignore[arg-type]
+            await asyncio.sleep(0)
+            assert request.receive_calls == 1
+
+
+async def test__disconnect_event__when_mixed_with_fencing__then_both_see_disconnect() -> None:
+    request = MockRequest()
+
+    async for fencing in _use_dependency(request):
+        async for event in disconnect_event(request):  # type: ignore[arg-type]
+            with fencing.move_on_cancel() as fence:
+                request.disconnect()
+                await asyncio.sleep(10)
+
+            assert event.is_set()
+            assert fence.cancelled_by("disconnect")
 
 
 # --- disconnect_fencing: disconnect fires ---
