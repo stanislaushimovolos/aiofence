@@ -396,4 +396,27 @@ The binding itself is sound. FastAPI tears down `yield` dependencies *after* the
 
 Whichever call reaches `receive()` first wins, which in practice comes down to whether the handler suspended before returning the response — not something to depend on. Servers declaring `spec_version` `2.4` or higher skip Starlette's listener entirely, and the fencing behaves normally there.
 
-For now, don't fence streaming endpoints. A proper fix needs middleware that owns the channel once and replays the disconnect downstream, so both readers see it.
+### Caveat: server-sent events
+
+`sse-starlette` is the same conflict with the outcome reversed. `EventSourceResponse` runs its `_listen_for_disconnect` loop unconditionally — it deliberately declines Starlette's `2.4` fast path, because that loop also drives `client_close_handler_callable` and clears the `active` flag that stops pings. Its listener is started last, so the watcher wins the channel consistently:
+
+- `cancelled_by("disconnect")` works, and the fence cancels the generator as intended.
+- `client_close_handler_callable` never runs.
+- `active` stays `True`, so pings keep going out to a closed socket until the generator ends on its own.
+
+```python
+@app.get("/tokens", dependencies=[Depends(disconnect_fencing)])
+async def handler():
+    async def events():
+        with get_current_fencing().move_on_cancel() as fence:
+            async for token in llm.stream(prompt):
+                yield token
+        # fence.cancelled_by("disconnect") is True here — but the
+        # EventSourceResponse close handler was never called
+
+    return EventSourceResponse(events(), client_close_handler_callable=on_close)
+```
+
+So fencing an SSE endpoint gets you cancellation while quietly switching off sse-starlette's own disconnect handling. If you depend on the close handler for cleanup, billing, or metrics, leave the endpoint unfenced for now.
+
+Both caveats have the same fix: middleware that owns the channel once and replays the disconnect downstream, so every reader observes it.

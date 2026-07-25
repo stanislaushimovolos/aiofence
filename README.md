@@ -172,7 +172,7 @@ Requires `starlette` (installed with FastAPI). No additional dependencies.
 
 **Nested Fences are not supported.** Entering a `Fence` while another is active on the same task raises `RuntimeError`. Use sequential fences or `get_current_fencing()` composition instead. See [#12](https://github.com/stanislaushimovolos/aiofence/issues/12) for details and progress.
 
-**The disconnect dependencies own the ASGI receive channel.** While one is active the handler must not read the raw body, and streaming responses are unreliable — Starlette's `StreamingResponse` reads the same channel and the two compete. See the caveats in the [API Guide](docs/api.md#caveat-dont-read-the-raw-body).
+**The disconnect dependencies own the ASGI receive channel.** While one is active the handler must not read the raw body, and streaming responses are unreliable — Starlette's `StreamingResponse` and sse-starlette's `EventSourceResponse` read the same channel, and the readers compete. With SSE the fence still works but sse-starlette's own close handler never fires. See the caveats in the [API Guide](docs/api.md#caveat-dont-read-the-raw-body).
 
 ## Requirements
 
