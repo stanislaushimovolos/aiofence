@@ -179,7 +179,7 @@ Requires `starlette` (installed with FastAPI). No additional dependencies.
 - [API Guide](docs/api.md) — usage, patterns, and examples
 - [Architecture](docs/architecture.md) — how it works, cancellation flow, design decisions
 - [Why Suppress](docs/why-suppress.md) — why `CancelledError` is suppressed instead of raised
-- [Disconnect Watcher Analysis](docs/disconnect-watcher-analysis.md) — how the disconnect watcher interacts with the ASGI stack, and where it breaks
+- [Disconnect Delivery — Design Rationale](docs/disconnect-watcher-analysis.md) — why the middleware owns the receive channel, and why the dependencies have no fallback
 - [CPython Task Cancellation](docs/cpython-task-cancellation.md) — how `asyncio.Task` cancellation works under the hood
 
 ## Caveats

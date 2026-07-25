@@ -520,7 +520,7 @@ Plain ASGI and plain Starlette apps have no dependency injection at all, so `fen
 
 ### Known limitations
 
-Full mechanics and evidence for everything the middleware fixes: [Disconnect Watcher Analysis](disconnect-watcher-analysis.md).
+Why the middleware is shaped this way, and the indexed list of what breaks without it: [Disconnect Delivery — Design Rationale](disconnect-watcher-analysis.md).
 
 **Exception handlers see no *dependency-bound* fencing.** FastAPI applies exception handling outside the dependency exit stacks, so on the error path the stack unwinds first — and note this inverts the teardown ordering of the success path. Bind through the middleware's `fencing_code` if a custom handler needs to ask "was this a disconnect?"; the event itself is always readable from the scope with `get_disconnect_event(request.scope)`.
 

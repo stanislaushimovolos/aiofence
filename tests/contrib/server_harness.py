@@ -2,8 +2,8 @@
 Server-fidelity ASGI harness.
 
 ``asgi_harness.scripted_receive`` is more forgiving than any real server, and
-each divergence hides a finding (see docs/disconnect-watcher-analysis.md, "Test
-gaps"). ``FakeServer`` models what the four production servers actually do:
+each divergence made a finding structurally untestable. ``FakeServer`` models
+what the four production servers actually do:
 
 * ``http.request`` framing with ``more_body``, fed upfront or mid-request
 * ``http.disconnect`` once the response completes, on a client that never left
