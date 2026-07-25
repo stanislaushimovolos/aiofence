@@ -237,13 +237,17 @@ with Fence(TimeoutTrigger(5), EventTrigger(shutdown, code="shutdown")) as fence:
 
 ## Starlette / FastAPI Integration
 
-`aiofence.contrib.starlette` provides a FastAPI dependency that cancels the current `Fencing` when the client disconnects.
+The integration is two modules. `aiofence.contrib.starlette` holds [`DisconnectMiddleware`](#disconnectmiddleware--one-reader-for-the-channel), which owns the request's receive channel and publishes its disconnect event. `aiofence.contrib.fastapi` holds the dependencies that read it.
+
+**The middleware is required.** The dependencies raise `RuntimeError` without it — see [why there is no fallback](#why-the-middleware-is-required).
 
 ```python
 from fastapi import FastAPI
+from starlette.middleware import Middleware
+from aiofence.contrib.starlette import DisconnectMiddleware
 from aiofence.contrib.fastapi import DisconnectFencing
 
-app = FastAPI()
+app = FastAPI(middleware=[Middleware(DisconnectMiddleware)])   # outermost
 
 @app.get("/work")
 async def handler(fencing: DisconnectFencing):
@@ -254,7 +258,7 @@ async def handler(fencing: DisconnectFencing):
         return Response(status_code=499)
 ```
 
-`DisconnectFencing` is an alias for `Annotated[Fencing, Depends(disconnect_fencing)]`, from `aiofence.contrib.fastapi` (requires `fastapi`). `aiofence.contrib.starlette` holds the dependencies themselves and works with plain Starlette.
+`DisconnectFencing` is an alias for `Annotated[Fencing, Depends(disconnect_fencing)]`. Plain Starlette and raw ASGI apps have no dependency injection: they use the middleware's [`fencing_code`](#binding-the-fencing-app-wide) or read the event directly with [`get_disconnect_event()`](#reading-the-event-directly).
 
 There is a matching `DisconnectEvent` — `Annotated[asyncio.Event, Depends(disconnect_event)]` — for handlers that want to pick their own stopping point rather than be cancelled:
 
@@ -271,21 +275,27 @@ async def handler(gone: DisconnectEvent):
     return hits
 ```
 
-**Requires `fastapi>=0.118` / `starlette>=0.42`** — install with `pip install "aiofence[fastapi]"`. FastAPI 0.106–0.117 tear yield dependencies down *before* the response is sent, which leaves the watcher dead for the whole streaming phase. The core package itself stays dependency-free.
-
-**Install [`DisconnectMiddleware`](#disconnectmiddleware--one-reader-for-the-channel) too.** The dependencies work on their own, but only the middleware can tell "the client left" from "the response finished", and only it can share the receive channel with `StreamingResponse`, `EventSourceResponse` and raw body reads. Everything under [Known limitations](#known-limitations) is what you get without it.
+**Requires `fastapi>=0.118` / `starlette>=0.42`** — install with `pip install "aiofence[fastapi]"`. FastAPI 0.106–0.117 tear yield dependencies down *before* the response is sent, which unbinds the fencing from the context for the whole streaming phase. The core package itself stays dependency-free.
 
 `disconnect_fencing` does three things:
 
-1. Gets the request's disconnect `asyncio.Event` — the one `DisconnectMiddleware` published, or, with no middleware installed, one it creates and caches in the ASGI scope itself
+1. Reads the request's disconnect `asyncio.Event` — the one `DisconnectMiddleware` published
 2. Adds it to `get_current_fencing()` with `code="disconnect"`
 3. Binds the result as the active `Fencing` context via `bind_fencing()`
 
+#### Why the middleware is required
+
+An ASGI receive channel has exactly one useful reader, and a dependency cannot be it: Starlette hands `StreamingResponse` and `EventSourceResponse` the raw `receive` captured before any dependency runs, so there is nothing left for a dependency to wrap. A dependency that read the channel anyway would steal body chunks and streaming messages from the rest of the stack, and could not tell "the client left" from "the response finished" — which cancels `BackgroundTasks` on every successful request. Both are fixed by reading the channel once, above everything else.
+
+So there is no watch-it-yourself fallback. The dependencies raise rather than degrade:
+
+```
+RuntimeError: aiofence disconnect signalling requires DisconnectMiddleware. Install it outermost: ...
+```
+
 #### One reader per request
 
-Two independent receive loops would steal each other's messages and neither would be guaranteed to see the disconnect, so there is only ever one. `disconnect_fencing`, `disconnect_event`, and any number of `disconnect_fencing_dependency(...)` variants therefore combine freely on one endpoint.
-
-With the middleware installed the dependencies own nothing: they borrow the published event, and the middleware's pump is the single reader for the whole request. Without it, the first entrant starts a watch loop and caches it in the scope. That watch is reference counted — the last one out cancels the listener and drops the scope entry — so reuse is safe in any order: a short-lived dependency exiting under a long-lived one doesn't take the listener with it, and a dependency entering later in the same request starts a fresh watch instead of inheriting a dead event.
+The middleware's pump is the single reader for the whole request; the dependencies own nothing and start nothing. `disconnect_fencing`, `disconnect_event`, and any number of `disconnect_fencing_dependency(...)` variants therefore combine freely on one endpoint — they all read the same published event.
 
 #### Layering codes
 
@@ -308,10 +318,7 @@ Registering the same event under the *same* code twice collapses to a single tri
 
 If `receive()` raises — a transport error, or `BaseHTTPMiddleware` rejecting a message — the disconnect event **can no longer fire** for that request: `fence.cancelled_by("disconnect")` stays `False` however long the client has been gone. Nothing is propagated into the request's teardown either way, because by then the response has usually already been sent and Starlette could only turn it into a truncated response plus `RuntimeError("Caught handled exception, but response already started")`.
 
-Where the error shows up depends on which reader owns the channel:
-
-- **With the middleware** — it is re-raised from the next downstream `receive()`, at the point where the application actually reads, and it never replaces the application's own exception. If nothing ever reads again it is logged at `WARNING` on the `aiofence.contrib.middleware` logger when the request ends.
-- **Without it** — the dependency's watcher logs the exception to the `aiofence.contrib.starlette` logger and stays down. Watch that logger.
+The middleware latches the exception and re-raises it from the next downstream `receive()`, at the point where the application actually reads, and it never replaces the application's own exception. If nothing ever reads again it is logged at `WARNING` on the `aiofence.contrib.starlette` logger when the request ends.
 
 ### Composing with other triggers
 
@@ -346,7 +353,7 @@ async def process():
 `disconnect_fencing_dependency` builds a dependency with a different code:
 
 ```python
-from aiofence.contrib.starlette import disconnect_fencing_dependency
+from aiofence.contrib.fastapi import disconnect_fencing_dependency
 
 ClientGone = Annotated[Fencing, Depends(disconnect_fencing_dependency(code="client_gone"))]
 
@@ -395,16 +402,14 @@ def handler():                             # note: def, not async def
 
 Read the codes if you want to log them; make the handler `async def` if you want cancellation.
 
-### Both dependencies, both frameworks
+### Both dependencies
 
 The disconnect event — stop at your own pace:
 
 ```python
-# Starlette
-async def handler(gone: asyncio.Event = Depends(disconnect_event)):
-    ...
+from aiofence.contrib.fastapi import DisconnectEvent
 
-# FastAPI
+@app.get("/search")
 async def handler(gone: DisconnectEvent):
     hits = []
     for shard in shards:
@@ -417,11 +422,9 @@ async def handler(gone: DisconnectEvent):
 The fencing — be cancelled instead:
 
 ```python
-# Starlette
-async def handler(fencing: Fencing = Depends(disconnect_fencing)):
-    ...
+from aiofence.contrib.fastapi import DisconnectFencing
 
-# FastAPI
+@app.get("/render")
 async def handler(fencing: DisconnectFencing):
     with fencing.timeout(30, code="budget").move_on_cancel() as fence:
         result = await render_scene()
@@ -431,15 +434,29 @@ async def handler(fencing: DisconnectFencing):
     return result
 ```
 
-`DisconnectEvent` and `DisconnectFencing` come from `aiofence.contrib.fastapi`; both dependencies from `aiofence.contrib.starlette`.
+Both are `Annotated[..., Depends(...)]` aliases over `disconnect_event` / `disconnect_fencing` in the same module — use the plain dependencies with `Depends()` if you prefer.
+
+### Plain Starlette and raw ASGI
+
+There is no dependency injection to hook into, so the middleware does both jobs itself:
+
+```python
+app = Starlette(middleware=[Middleware(DisconnectMiddleware, fencing_code="disconnect")])
+
+async def endpoint(request: Request) -> Response:
+    with get_current_fencing().move_on_cancel() as fence:   # bound by the middleware
+        result = await long_work()
+
+    gone = get_disconnect_event()                           # or read the event directly
+```
 
 ### `DisconnectMiddleware` — one reader for the channel
 
-The dependencies alone cannot fix the two channel problems below: a dependency never sees the `receive` that Starlette already handed to `StreamingResponse`, and no reader at wire level can tell a client leaving from a response finishing. `DisconnectMiddleware` sits above the whole stack, reads the channel exactly once per request, and replays what it read to everyone underneath.
+`DisconnectMiddleware` sits above the whole stack, reads the channel exactly once per request, and replays what it read to everyone underneath. It is what makes disconnect signalling possible at all — [nothing below it can do this job](#why-the-middleware-is-required).
 
 ```python
 from starlette.middleware import Middleware
-from aiofence.contrib.middleware import DisconnectMiddleware
+from aiofence.contrib.starlette import DisconnectMiddleware
 
 app = FastAPI(middleware=[Middleware(DisconnectMiddleware)])
 # or, equivalently — but make it the last add_middleware call:
@@ -448,22 +465,29 @@ app.add_middleware(DisconnectMiddleware)
 
 **Install it outermost** — first entry of `middleware=[...]`, or the *last* `add_middleware` call, so it owns the server's own `receive` rather than another middleware's wrapper. Below a `BaseHTTPMiddleware` it still works, but it then owns that middleware's non-reentrant `wrapped_receive` instead.
 
-Nothing else changes. `disconnect_fencing` / `disconnect_event` borrow the event the middleware published and start no watcher of their own; with no middleware installed they keep their own. Installing it is a configuration change, and so is rolling it back.
+#### Reading the event directly
 
-The event is published in the ASGI scope, so code with no dependency to hand can read it directly:
+The middleware publishes the event in the ASGI scope *and* binds it for the request's context, so code with no dependency and no `Request` to hand can still read it:
 
 ```python
-from aiofence.contrib.middleware import get_disconnect_event
+from aiofence.contrib.starlette import get_disconnect_event, require_disconnect_event
+
+async def deep_helper():
+    gone = get_disconnect_event()                # ambient: None outside a fenced request
+    if gone is not None and gone.is_set():
+        return partial_result
 
 async def endpoint(request: Request) -> Response:
-    gone = get_disconnect_event(request.scope)   # None when the middleware isn't installed
+    gone = require_disconnect_event(request.scope)   # explicit scope; raises if not installed
 ```
 
-The key is removed again when the request ends, so nothing can hold a reference to an event whose reader is gone.
+`get_disconnect_event` asks — it returns `None` when the middleware isn't installed. `require_disconnect_event` demands, and raises the same `RuntimeError` the dependencies do. Both take an optional `scope`: pass one when you have it (an exception handler, or a task the request didn't spawn itself), omit it anywhere below the middleware on the request's own call stack.
 
-#### What it fixes
+Both the scope key and the context binding are dropped when the request ends, so nothing can hold a reference to an event whose reader is gone.
 
-| | Dependency only | With the middleware |
+#### What it buys
+
+| | If a dependency read the channel itself | With the middleware |
 |---|---|---|
 | `BackgroundTasks` on a successful request | cancelled every time — a completed response reads as a disconnect | run normally; the event fires only while the response is unfinished |
 | Raw body reads (`Request`-only handler) | hang, or silently return `b""` | exact bytes, in order, however late they are read |
@@ -496,69 +520,7 @@ Plain ASGI and plain Starlette apps have no dependency injection at all, so `fen
 
 ### Known limitations
 
-Two properties of the ASGI receive channel drive the first half of this list. Neither is fixable from a dependency, and both are fixed by [`DisconnectMiddleware`](#disconnectmiddleware--one-reader-for-the-channel). Full mechanics and evidence: [Disconnect Watcher Analysis](disconnect-watcher-analysis.md).
-
-1. **The channel has one useful reader.** `receive()` is a queue pop, not a broadcast. The dependency's watcher loops on it and discards every message that isn't `http.disconnect`, so anything else in the stack that reads the channel splits the message stream with the watcher.
-2. **`http.disconnect` doesn't only mean "the client left."** Per the ASGI spec it is also sent once the response has been sent. Every server collapses the two, and at wire level no reader can tell them apart.
-
-#### Without the middleware
-
-**`BackgroundTasks` are cancelled on every successful request.** This follows from (2). `Response.__call__` awaits `self.background()` after the final body send, while the watcher is still alive and parked in `receive()` — so it wakes with `http.disconnect` and sets the event. Any `Fence` opened after that point is cancelled immediately, and reports `cancelled_by("disconnect") == True` on a request where the client never left. Don't fence background work, and don't use `get_current_fencing()` inside a background task on a fenced route.
-
-```python
-@app.get("/work", dependencies=[Depends(disconnect_fencing)])
-async def handler(bt: BackgroundTasks):
-    bt.add_task(work)        # work() sees an already-cancelled fencing
-    return {"ok": True}
-```
-
-**Raw body reads are unsafe.** The unsafe shape is a handler that declares **no body parameter** — FastAPI only pre-reads and caches the body when one is declared, so a `Request`-only handler is unprotected whether or not it reads raw. A raw read after any suspension point either hangs forever or, if the watcher already took a chunk, returns a **silently truncated** `b""` that Starlette accepts as a complete empty body. No exception, no log.
-
-```python
-@app.post("/upload")
-async def handler(fencing: DisconnectFencing, payload: Payload, request: Request):
-    await something()
-    body = await request.body()      # cached before the watcher existed — safe
-
-@app.post("/raw")
-async def handler(fencing: DisconnectFencing, request: Request):
-    await something()
-    body = await request.body()      # may hang, or silently return b""
-```
-
-**`StreamingResponse` is a rival reader.** Starlette runs its own `listen_for_disconnect` unless the server declares ASGI `spec_version` 2.4 or higher — and **no current production server does**: uvicorn 0.32.1+ ships `2.3`, hypercorn `2.1`, granian `2.3`, daphne none at all, and the `TestClient` none. So the two-reader race is the normal path, not an edge case. Whoever wins decides: if the watcher wins, the fence fires and Starlette's listener parks forever; if Starlette wins, `cancelled_by("disconnect")` stays `False` and the body is aborted mid-stream instead. Which one wins turns on whether the handler suspended before returning the response.
-
-```python
-@app.get("/stream")
-async def handler(fencing: DisconnectFencing):
-    async def body():
-        yield first_chunk
-        with fencing.move_on_cancel() as fence:
-            await slow_step()        # may or may not be cancelled on disconnect
-        yield second_chunk
-
-    return StreamingResponse(body())
-```
-
-**SSE disables sse-starlette's close handling.** `EventSourceResponse` reads the channel unconditionally and starts its listener last, so the watcher wins deterministically. `cancelled_by("disconnect")` works — but `client_close_handler_callable` never runs and pings keep going to a closed socket. If you rely on that handler, install the middleware or leave the endpoint unfenced.
-
-```python
-@app.get("/tokens")
-async def handler(fencing: DisconnectFencing):
-    async def events():
-        with fencing.move_on_cancel() as fence:
-            async for token in llm.stream(prompt):
-                yield token
-        # fence.cancelled_by("disconnect") is True here, but on_close never ran
-
-    return EventSourceResponse(events(), client_close_handler_callable=on_close)
-```
-
-**Only uvicorn re-delivers `http.disconnect`.** hypercorn, daphne and granian enqueue it exactly once, so on those servers the reader that gets there first consumes it and the others never fire — the race above becomes a permanent loss for whoever came second. `Request.is_disconnected()` is not a fallback either: it is a reader too, and is independently broken under `BaseHTTPMiddleware`.
-
-**`Depends(..., scope="function")` (FastAPI ≥ 0.121) closes before the response,** so mixing it with a request-scoped disconnect dependency inverts the ordering the shared watch relies on: the fencing stays bound to an event whose watcher is already gone. Keep all disconnect dependencies on the default request scope. With the middleware there is no watch to outlive, and the published event lives for the whole request either way.
-
-#### With the middleware or without it
+Full mechanics and evidence for everything the middleware fixes: [Disconnect Watcher Analysis](disconnect-watcher-analysis.md).
 
 **Exception handlers see no *dependency-bound* fencing.** FastAPI applies exception handling outside the dependency exit stacks, so on the error path the stack unwinds first — and note this inverts the teardown ordering of the success path. Bind through the middleware's `fencing_code` if a custom handler needs to ask "was this a disconnect?"; the event itself is always readable from the scope with `get_disconnect_event(request.scope)`.
 

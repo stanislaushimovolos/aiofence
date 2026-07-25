@@ -17,8 +17,8 @@ dependencies = []
 
 # The core package stays dependency-free. These extras carry only the floors
 # `aiofence.contrib` needs: FastAPI >= 0.118 tears yield dependencies down
-# after the response (0.106-0.117 did it before, which kills the disconnect
-# watcher for the whole streaming phase), and Starlette >= 0.42 has the ASGI
+# after the response (0.106-0.117 did it before, which unbinds the disconnect
+# fencing for the whole streaming phase), and Starlette >= 0.42 has the ASGI
 # spec_version gate in StreamingResponse.
 # See docs/disconnect-watcher-analysis.md.
 [project.optional-dependencies]

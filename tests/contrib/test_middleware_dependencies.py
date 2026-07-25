@@ -1,59 +1,36 @@
 """
-The existing dependencies on top of ``DisconnectMiddleware``.
+The dependencies on top of ``DisconnectMiddleware``, against a driven server.
 
 The middleware owns the channel and the event; ``disconnect_event`` /
-``disconnect_fencing`` must reuse it and must not start a watcher of their own.
-Covers the D1 background-task repro, the D2 code collapse and the D3 scope-cache
-lifetime with the middleware in place.
+``disconnect_fencing`` only read it. Covers the D1 background-task repro, the D2
+code collapse and the D3 lifetime question — none of which the dependencies can
+get wrong any more, since there is no watch of their own left to outlive.
 See docs/disconnect-watcher-analysis.md.
-
-These tests reach into ``aiofence.contrib.starlette``, which is being fixed
-separately for D2/D3 — they encode the end state, not today's behaviour.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncGenerator, AsyncIterator
-from contextlib import aclosing, asynccontextmanager
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI
+from fastapi import APIRouter, BackgroundTasks, Depends
 from starlette.requests import Request
 
 from aiofence import get_current_fencing
-from aiofence.contrib.fastapi import DisconnectEvent, DisconnectFencing
-from aiofence.contrib.middleware import (
-    DISCONNECT_EVENT_SCOPE_KEY,
-    DisconnectMiddleware,
-    get_disconnect_event,
-)
-from aiofence.contrib.starlette import (
+from aiofence.contrib.fastapi import (
+    DisconnectEvent,
+    DisconnectFencing,
     disconnect_event,
     disconnect_fencing,
     disconnect_fencing_dependency,
 )
+from aiofence.contrib.starlette import DISCONNECT_EVENT_SCOPE_KEY, get_disconnect_event
 
-from .asgi_harness import bound_codes
+from .asgi_harness import bound_codes, fenced_app
 from .server_harness import FakeServer, run_app, serve, wait_for, wait_until
 
 PAYLOAD = b'{"query":"IMPORTANT PAYLOAD"}'
-
-
-def fenced_app(**kwargs: Any) -> FastAPI:
-    app = FastAPI(**kwargs)
-    app.add_middleware(DisconnectMiddleware)
-    return app
-
-
-@asynccontextmanager
-async def entered_dependency(
-    dependency: AsyncGenerator[asyncio.Event],
-) -> AsyncIterator[asyncio.Event]:
-    """Enter and tear down a yield dependency the way FastAPI's exit stack does."""
-    async with aclosing(dependency) as generator:
-        yield await anext(generator)
 
 
 # --- the dependency reuses what the middleware published ---
@@ -199,10 +176,10 @@ async def test__two_codes__when_client_disconnects__then_both_codes_fire() -> No
     assert observed == [{"disconnect": True, "client_gone": True}]
 
 
-# --- D3: no watcher to outlive, so re-entry is safe ---
+# --- D3: no watch to outlive, so every entrant gets the same live event ---
 
 
-async def test__disconnect_event__when_used_again_after_teardown__then_still_fires() -> None:
+async def test__disconnect_event__when_used_again__then_same_event_still_fires() -> None:
     app = fenced_app()
     server = FakeServer()
     entered = asyncio.Event()
@@ -210,14 +187,13 @@ async def test__disconnect_event__when_used_again_after_teardown__then_still_fir
 
     @app.get("/work")
     async def handler(request: Request) -> dict[str, bool]:
-        async with entered_dependency(disconnect_event(request)) as first:
-            assert not first.is_set()
+        first = await disconnect_event(request)
+        second = await disconnect_event(request)
+        assert second is first
 
-        async with entered_dependency(disconnect_event(request)) as second:
-            entered.set()
-            await wait_for(second)
-            observed.append(second.is_set())
-
+        entered.set()
+        await wait_for(second)
+        observed.append(second.is_set())
         return {"ok": True}
 
     async with serve(app, server):
@@ -234,14 +210,14 @@ async def test__disconnect_event__when_two_concurrent_entrants__then_both_see_di
     observed: list[str] = []
 
     async def short(request: Request) -> None:
-        async with entered_dependency(disconnect_event(request)) as event:
-            observed.append(f"short:{event.is_set()}")
+        event = await disconnect_event(request)
+        observed.append(f"short:{event.is_set()}")
 
     async def long_lived(request: Request) -> None:
-        async with entered_dependency(disconnect_event(request)) as event:
-            entered.set()
-            await wait_for(event)
-            observed.append(f"long:{event.is_set()}")
+        event = await disconnect_event(request)
+        entered.set()
+        await wait_for(event)
+        observed.append(f"long:{event.is_set()}")
 
     @app.get("/work")
     async def handler(request: Request) -> dict[str, bool]:

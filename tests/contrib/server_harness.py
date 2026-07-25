@@ -12,6 +12,13 @@ gaps"). ``FakeServer`` models what the four production servers actually do:
 * a ``receive`` that raises
 * a bounded app queue (hypercorn's ``max_app_queue_size``, default 10)
 * a selectable — or absent — ASGI ``spec_version``
+* the response-trailers extension, where the response is not complete until the
+  final ``http.response.trailers`` message rather than the final body one
+
+The completion rule is deliberately reimplemented here rather than imported from
+``aiofence.contrib.starlette``: the harness models what a server does, and
+sharing the predicate with the code under test would make it agree by
+construction.
 
 Every helper is bounded by ``DEFAULT_TIMEOUT`` so a hang fails the test instead
 of blocking CI.
@@ -92,6 +99,7 @@ class FakeServer:
         self._error = error
         self._error_after = error_after
         self._client_gone = False
+        self._expects_trailers = False
         self._waiters: list[asyncio.Future[None]] = []
         self._pending: deque[Message] = deque()
         if not defer_body:
@@ -119,8 +127,16 @@ class FakeServer:
 
     async def send(self, message: Message) -> None:
         self.sent.append(message)
-        if _completes_response(message):
-            self.response_complete = True
+        match message["type"]:
+            case "http.response.start":
+                self._expects_trailers = bool(message.get("trailers", False))
+            case "http.response.body" | "http.response.pathsend":
+                self.response_complete = not message.get("more_body", False) and (
+                    not self._expects_trailers
+                )
+            case "http.response.trailers":
+                self.response_complete = not message.get("more_trailers", False)
+        if self.response_complete:
             self._notify()
 
     async def feed_body(self, chunk: bytes, *, more_body: bool = True) -> None:
@@ -283,12 +299,6 @@ def _frame(chunks: Sequence[bytes]) -> list[Message]:
         {"type": "http.request", "body": chunk, "more_body": index < len(chunks) - 1}
         for index, chunk in enumerate(chunks)
     ]
-
-
-def _completes_response(message: Message) -> bool:
-    if message["type"] == "http.response.pathsend":
-        return True
-    return message["type"] == "http.response.body" and not message.get("more_body", False)
 
 
 def _build_scope(

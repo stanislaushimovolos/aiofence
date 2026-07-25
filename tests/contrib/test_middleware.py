@@ -18,10 +18,11 @@ import pytest
 from starlette.types import Message, Receive, Scope, Send
 
 from aiofence import get_current_fencing
-from aiofence.contrib.middleware import (
+from aiofence.contrib.starlette import (
     DISCONNECT_EVENT_SCOPE_KEY,
     DisconnectMiddleware,
     get_disconnect_event,
+    require_disconnect_event,
 )
 
 from .asgi_harness import bound_codes
@@ -80,6 +81,77 @@ async def test__get_disconnect_event__when_middleware_absent__then_returns_none(
     server = FakeServer()
 
     assert get_disconnect_event(server.scope) is None
+
+
+# --- ambient lookup: no scope, no request ---
+
+
+async def test__get_disconnect_event__when_called_without_scope__then_returns_published_event() -> (
+    None
+):
+    seen: list[asyncio.Event | None] = []
+
+    async def nested_callee() -> None:
+        seen.append(get_disconnect_event())
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        await nested_callee()
+        seen.append(published_event(scope))
+        await respond(send)
+
+    await run_app(DisconnectMiddleware(app), FakeServer())
+
+    assert seen[0] is seen[1]
+
+
+async def test__get_disconnect_event__when_called_outside_a_request__then_returns_none() -> None:
+    assert get_disconnect_event() is None
+
+
+async def test__get_disconnect_event__when_request_ended__then_binding_released() -> None:
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        await respond(send)
+
+    await run_app(DisconnectMiddleware(app), FakeServer())
+
+    assert get_disconnect_event() is None
+
+
+async def test__require_disconnect_event__when_middleware_absent__then_raises() -> None:
+    with pytest.raises(RuntimeError, match="DisconnectMiddleware"):
+        require_disconnect_event()
+
+
+async def test__require_disconnect_event__when_called_without_scope__then_returns_event() -> None:
+    seen: list[asyncio.Event] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        seen.append(require_disconnect_event())
+        seen.append(published_event(scope))
+        await respond(send)
+
+    await run_app(DisconnectMiddleware(app), FakeServer())
+
+    assert seen[0] is seen[1]
+
+
+async def test__get_disconnect_event__when_client_disconnects__then_ambient_event_set() -> None:
+    server = FakeServer()
+    entered = asyncio.Event()
+    observed: list[bool] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        event = require_disconnect_event()
+        entered.set()
+        await wait_for(event)
+        observed.append(event.is_set())
+        await respond(send)
+
+    async with serve(DisconnectMiddleware(app), server):
+        await wait_for(entered)
+        server.disconnect()
+
+    assert observed == [True]
 
 
 # --- D1: "response finished" is not "client left" ---
@@ -190,6 +262,64 @@ async def test__middleware__when_client_disconnects_mid_stream__then_event_set()
         server.disconnect()
 
     assert seen[0].is_set()
+
+
+# --- D17: response trailers extend the response past the final body message ---
+
+
+def start_with_trailers() -> Message:
+    return {"type": "http.response.start", "status": 200, "headers": [], "trailers": True}
+
+
+async def test__middleware__when_client_disconnects_before_trailers__then_event_set() -> None:
+    server = FakeServer()
+    seen: list[asyncio.Event] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        seen.append(published_event(scope))
+        await send(start_with_trailers())
+        await send({"type": "http.response.body", "body": b"ok", "more_body": False})
+        server.disconnect()  # the client leaves while the trailers are still owed
+        await wait_until(lambda: server.disconnects_delivered >= 1)
+        await send({"type": "http.response.trailers", "headers": [], "more_trailers": False})
+
+    await run_app(DisconnectMiddleware(app), server)
+
+    assert seen[0].is_set()
+
+
+async def test__middleware__when_client_disconnects_between_trailers__then_event_set() -> None:
+    server = FakeServer()
+    seen: list[asyncio.Event] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        seen.append(published_event(scope))
+        await send(start_with_trailers())
+        await send({"type": "http.response.body", "body": b"ok", "more_body": False})
+        await send({"type": "http.response.trailers", "headers": [], "more_trailers": True})
+        server.disconnect()
+        await wait_until(lambda: server.disconnects_delivered >= 1)
+        await send({"type": "http.response.trailers", "headers": [], "more_trailers": False})
+
+    await run_app(DisconnectMiddleware(app), server)
+
+    assert seen[0].is_set()
+
+
+async def test__middleware__when_trailers_complete_the_response__then_event_not_set() -> None:
+    server = FakeServer()
+    seen: list[asyncio.Event] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        seen.append(published_event(scope))
+        await send(start_with_trailers())
+        await send({"type": "http.response.body", "body": b"ok", "more_body": False})
+        await send({"type": "http.response.trailers", "headers": [], "more_trailers": False})
+        await wait_until(lambda: server.disconnects_delivered >= 1)
+
+    await run_app(DisconnectMiddleware(app), server)
+
+    assert not seen[0].is_set()
 
 
 # --- D5: body chunks are forwarded, not discarded ---
@@ -374,10 +504,10 @@ async def test__middleware__when_receive_raises_and_never_read__then_warning_log
         await asyncio.sleep(0.01)
         await respond(send)
 
-    with caplog.at_level(logging.WARNING, logger="aiofence.contrib.middleware"):
+    with caplog.at_level(logging.WARNING, logger="aiofence.contrib.starlette"):
         await run_app(DisconnectMiddleware(app), FakeServer(error=RuntimeError("channel")))
 
-    ours = [r for r in caplog.records if r.name == "aiofence.contrib.middleware"]
+    ours = [r for r in caplog.records if r.name == "aiofence.contrib.starlette"]
 
     assert [r.levelno for r in ours] == [logging.WARNING]
 

@@ -28,7 +28,7 @@ from starlette.responses import Response, StreamingResponse
 from starlette.routing import Route
 
 from aiofence import Fence, get_current_fencing
-from aiofence.contrib.middleware import DisconnectMiddleware, get_disconnect_event
+from aiofence.contrib.starlette import DisconnectMiddleware, get_disconnect_event
 
 from .asgi_harness import bound_codes
 from .server_harness import (

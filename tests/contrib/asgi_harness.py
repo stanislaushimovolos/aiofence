@@ -4,9 +4,21 @@ import asyncio
 import json
 from typing import Any
 
+from fastapi import FastAPI
 from starlette.types import ASGIApp, Message, Receive, Scope
 
 from aiofence import get_current_fencing
+from aiofence.contrib.starlette import DisconnectMiddleware
+
+
+def fenced_app(**kwargs: Any) -> FastAPI:
+    """
+    FastAPI with ``DisconnectMiddleware`` outermost — the disconnect
+    dependencies require it and raise without it.
+    """
+    app = FastAPI(**kwargs)
+    app.add_middleware(DisconnectMiddleware)
+    return app
 
 
 def http_scope(path: str = "/work", spec_version: str = "2.3") -> Scope:

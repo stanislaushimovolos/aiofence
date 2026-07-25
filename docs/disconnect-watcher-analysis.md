@@ -3,6 +3,14 @@
 > How `aiofence.contrib.starlette` interacts with the rest of the ASGI stack, and where it
 > breaks. Supersedes and absorbs the earlier `receive-channel-conflicts.md`.
 
+> **Status (superseded in part).** The dependency-owned watcher this document
+> analyses no longer exists. `aiofence.contrib.fastapi`'s dependencies are pure
+> readers of the event `DisconnectMiddleware` publishes and raise `RuntimeError`
+> when it is not installed — there is no fallback path left to break. Findings
+> D1–D7 are kept as the evidence for *why* the middleware is mandatory; read
+> them as a record of what a dependency-owned watcher does, not as current
+> behaviour.
+
 **Environment:** Python 3.12 · Starlette 0.52.1 · FastAPI 0.140.0 · anyio 4.12.1 ·
 sse-starlette 3.4.6. Server behaviour cross-checked against uvicorn 0.51.0, hypercorn
 0.18.0, daphne 4.2.3, granian 2.7.9, and the ASGI HTTP spec.
@@ -12,6 +20,14 @@ Findings carry a **verification** tag:
 - **reproduced** — reproduced directly against the installed stack
 - **agent-reproduced** — reproduced by a diagnostic pass, premises independently source-checked
 - **source-derived** — established by reading framework source; not executed
+
+**Module names moved after this analysis was written.** Parts A–C describe the original
+dependency-owns-a-watcher design, where `contrib/starlette.py` held `disconnect_event` /
+`disconnect_fencing` and `_shared_disconnect_event`. Every `starlette.py:NNN` citation and
+every mention of `_shared_disconnect_event` below refers to *that* module, which no longer
+exists. Today `contrib/starlette.py` is `DisconnectMiddleware`, the dependencies live in
+`contrib/fastapi.py`, and they have no watcher of their own. [Status](#status) is the only
+section that describes the code as it stands.
 
 ---
 
@@ -84,6 +100,7 @@ introduced by `749965d`.
 | [D14](#d14) | asyncio-only primitives, no Trio guard | low | source-derived |
 | [D15](#d15) | `asyncio.shield` in teardown is inert, and hides one error path | low | agent-reproduced |
 | [D16](#d16) | Version-bounded / server-specific hazards | low | source-derived |
+| [D17](#d17) | Response trailers: the response ends after the final body message, so a disconnect during the trailer window is swallowed | low | reproduced |
 
 ---
 
@@ -300,7 +317,7 @@ sse-starlette's own disconnect handling. For an LLM token-streaming endpoint tha
 shape: cancellation appears to work, but a close handler doing cleanup, billing, or metrics
 never runs, and pings keep going to a closed socket.
 
-Covered by `tests/contrib/test_sse_starlette.py`, which asserts both halves.
+Was covered by `tests/contrib/test_sse_starlette.py`; that file went away with the fallback path. `tests/contrib/test_middleware_sse.py` asserts the fixed behaviour.
 
 ### Aside: the shutdown watcher
 
@@ -611,6 +628,42 @@ since `shield` always wraps the coroutine in a fresh Task.
 
 ---
 
+<a id="d17"></a>
+## D17 — Response trailers move the end of the response — low
+
+**Found against the middleware, not the original dependency** — it is a defect in the
+[D1](#d1) fix rather than in the design it replaced.
+
+Distinguishing "client left" from "response finished" rests on knowing which `send` carries
+the last message of the response. `_completes_response` assumed that is always the final
+`http.response.body`. The ASGI response-trailers extension breaks the assumption: when
+`http.response.start` carries `"trailers": True`, the response continues until an
+`http.response.trailers` message with `more_trailers` unset.
+
+So the flag flipped one message early, and a client that left during the trailer window was
+latched as a completed response — replayed downstream, but the event never set. The failure
+is the mirror image of [D1](#d1): D1 fires on a client that never left, D17 stays silent for
+a client that did.
+
+```
+send  http.response.start   trailers=True
+send  http.response.body    more_body=False   <- response_complete flipped here
+      client disconnects
+send  http.response.trailers more_trailers=False
+      -> event never set, fence never cancelled
+```
+
+Low severity, because reaching it needs all of: an application that emits trailers, a server
+that implements the extension (hypercorn on h2/h3; uvicorn does not implement it at all), and
+a disconnect inside that window. The failure direction is the safe one — a missed
+cancellation, not a spurious one — which is why it survived unnoticed.
+
+Reproduced in `tests/contrib/test_middleware.py` (`..._before_trailers__then_event_set`,
+`..._between_trailers__then_event_set`). Modelling it required teaching `FakeServer` the same
+rule, since a trailers-aware server also defers its own completion disconnect.
+
+---
+
 <a id="clean"></a>
 # Checked and clean
 
@@ -702,31 +755,33 @@ their own terms.
 <a id="status"></a>
 ## Status
 
-`aiofence.contrib.middleware.DisconnectMiddleware` implements the above:
+`aiofence.contrib.starlette.DisconnectMiddleware` implements the above:
 `_RequestChannel` is the single reader, body messages are replayed in order, the disconnect
 is latched as a terminal side channel, and a wrapped `send` tracks `response_complete`.
-`aiofence.contrib.starlette` borrows the published event when the middleware is installed and
-keeps its own reference-counted watch when it is not — so installing it is a configuration
-change, and the dependency-only column below is still reachable by choosing not to.
+`aiofence.contrib.fastapi`'s dependencies borrow the published event and nothing more. The
+watch-it-yourself fallback was removed rather than kept behind a flag: every Part A finding
+is a property of *being a second reader*, so a degraded mode would only be a quieter bug.
+The middleware is therefore not optional, and no row below has a dependency-only column.
 
 | # | Status |
 |---|---|
-| [D1](#d1) | **closed with the middleware.** `response_complete` is flipped before the terminal message reaches the server's `send`, so a disconnect latched afterwards is replayed downstream but never sets the event. Background tasks survive. Dependency-only: unchanged |
+| [D1](#d1) | **closed with the middleware.** `response_complete` is flipped before the terminal message reaches the server's `send`, so a disconnect latched afterwards is replayed downstream but never sets the event. Background tasks survive. Trailers extend where that boundary sits — see [D17](#d17) |
 | [D2](#d2) | **closed.** `Fencing.event()` deduplicates on the `(event, code)` pair; every code reports independently. Independent of the middleware |
-| [D3](#d3) | **closed.** The watch is reference counted and uncached before teardown; with the middleware there is no watch to outlive at all |
-| [D4](#d4) | **closed.** The middleware latches the error, re-raises it from the next downstream `receive()`, never replaces the app's own exception, and logs at `WARNING` on `aiofence.contrib.middleware` if nothing ever reads. Dependency-only: logged and down, never re-raised at teardown. In both cases the event can no longer fire — inherent to a broken channel |
-| [D5](#d5) | **closed with the middleware.** `http.request` messages are forwarded in order and unchanged; raw reads after any suspension return exact bytes. Dependency-only: unchanged |
-| [D6](#d6) | **closed with the middleware.** Both readers are told on every `spec_version`. Which acts first is still scheduling — a *fenced* body deliberately outlives the rival listener's cancel scope, an unfenced one is still torn down by it. Dependency-only: unchanged |
-| [D7](#d7) | **closed with the middleware.** `client_close_handler_callable` runs, pings stop, *and* `cancelled_by("disconnect")` is True. Dependency-only: unchanged, and now asserted as such in `tests/contrib/test_sse_starlette.py` |
-| [D8](#d8) | **closed with the middleware.** One read of the server's channel, latched, then replayed to every later reader. Dependency-only: unchanged |
+| [D3](#d3) | **closed.** There is no watch to outlive: the middleware owns the channel for the whole request, and both the scope key and the context binding are dropped when it ends |
+| [D4](#d4) | **closed.** The middleware latches the error, re-raises it from the next downstream `receive()`, never replaces the app's own exception, and logs at `WARNING` on `aiofence.contrib.starlette` if nothing ever reads. The event can no longer fire either way — inherent to a broken channel |
+| [D5](#d5) | **closed with the middleware.** `http.request` messages are forwarded in order and unchanged; raw reads after any suspension return exact bytes |
+| [D6](#d6) | **closed with the middleware.** Both readers are told on every `spec_version`. Which acts first is still scheduling — a *fenced* body deliberately outlives the rival listener's cancel scope, an unfenced one is still torn down by it |
+| [D7](#d7) | **closed with the middleware.** `client_close_handler_callable` runs, pings stop, *and* `cancelled_by("disconnect")` is True. Dependency-only: no longer reachable — the dependencies require the middleware |
+| [D8](#d8) | **closed with the middleware.** One read of the server's channel, latched, then replayed to every later reader |
 | [D9](#d9) | **closed with the middleware.** Installed outermost it owns the server's own `receive`; installed below a `BaseHTTPMiddleware` it owns `wrapped_receive` but is its only reader, so the non-reentrancy cannot be tripped from our side. There is nothing left to mask, since D1 is fixed. `WSGIMiddleware` still cannot host any of this |
 | [D10](#d10) | **closed.** `pyproject.toml` carries `fastapi>=0.118` / `starlette>=0.42` extras |
-| [D11](#d11) | **open without the middleware.** A function-scoped disconnect dependency still closes before the response and can strand a request-scoped one on an orphaned event. Moot with the middleware — no watch ownership, and the published event lives for the whole request |
+| [D11](#d11) | **moot.** The dependencies own no watch, so scope ordering has nothing to strand. A function-scoped one still unbinds its `Fencing` before the response, which is ordinary `scope=` semantics rather than a disconnect defect; the published event lives for the whole request either way |
 | [D12](#d12) | **open, documented.** FastAPI structural: no running event loop in the threadpool, so a sync `def` handler cannot enter a fence |
 | [D13](#d13) | **partially closed.** `DisconnectMiddleware(fencing_code=...)` binds outside the dependency stacks, so exception handlers see the fencing; `get_disconnect_event(scope)` always works there. A *dependency*-bound fencing is still gone by the time a handler runs, and the error-path teardown ordering still inverts versus the happy path |
 | [D14](#d14) | **open by design, documented.** Both modules use `asyncio` primitives directly; aiofence is asyncio-only because `Fencing.event()` is typed against `asyncio.Event` |
 | [D15](#d15) | **closed.** The inert `asyncio.shield` is gone from the teardown |
 | [D16](#d16) | **partially closed.** hypercorn's `max_app_queue_size` is addressed — the pump drains unconditionally, which is why the body is buffered whether the app reads it or not. WebSocket spin is addressed: non-`http` scopes are passed through untouched with no scope key. Still open: uvicorn 0.43–0.44 waking every parked reader on shutdown (a pre-response disconnect, so it does set the event), granian h2's `notify_one()` across streams on one connection, and granian dropping a materialized chunk when a parked reader is cancelled |
+| [D17](#d17) | **closed.** The wrapped `send` reads `trailers` off `http.response.start` and defers completion to the final `http.response.trailers`, so the boundary sits at the real end of the response |
 
 Remaining costs of the middleware, both deliberate: one task per request, and the request body
 buffered in memory for the request's lifetime, which defeats server read backpressure on large
@@ -734,60 +789,45 @@ uploads. See [api.md](api.md#what-it-costs).
 
 ---
 
-# Documentation corrections required
+# Documentation corrections — done
 
-1. `docs/api.md:350` — sync `def` handlers: the claim that `fence.cancelled_by(...)` "still
-   reports correctly" is false; constructing a `Fence` raises. ([D12](#d12))
-2. `docs/api.md:397` — "servers declaring 2.4 or higher skip Starlette's listener" is true but
-   misleading: uvicorn ships 2.3, so the race is the default. ([D6](#d6))
-3. `docs/api.md:365-374` — the raw-body caveat should name the actual unsafe shape
-   (`Request`-only handlers, no declared body param) and state that the failure can be silent
-   truncation to `b""`, not only a hang. ([D5](#d5))
-4. `docs/api.md:280` — the scope cache is described without its lifetime contract: the entry
-   outlives the watcher, the watcher is owned by the first entrant, and reuse is safe only
-   while that entrant is on the stack. ([D3](#d3))
-5. `docs/api.md:274-278` — `disconnect_fencing` "Creates an `asyncio.Event`"; it may reuse
-   one. `starlette.py:38-40` says it "Builds on `disconnect_event`"; since `749965d` it builds
-   on `_shared_disconnect_event`.
-6. Undocumented entirely: [D1](#d1) (background tasks), [D2](#d2) (code collapse),
-   [D4](#d4), [D13](#d13) (exception handlers), [D14](#d14) (asyncio-only), and the required
-   FastAPI/Starlette version floor ([D10](#d10)).
+All six are applied in `docs/api.md`. Two of them stopped being corrections and became
+deletions: the scope-cache lifetime contract and "`disconnect_fencing` creates an
+`asyncio.Event`" both described the watcher-owning dependency, which no longer exists.
+
+| Was | Now |
+|---|---|
+| sync `def` handlers "still report correctly" ([D12](#d12)) | "cannot be fenced at all" — the threadpool has no running loop |
+| "2.4 and above skip Starlette's listener" ([D6](#d6)) | stated as the exception it is; uvicorn ships 2.3, so the race is the default |
+| raw-body caveat named only hangs ([D5](#d5)) | names the unsafe shape (`Request`-only handler) and the silent `b""` truncation |
+| scope-cache lifetime undocumented ([D3](#d3)) | gone with the cache |
+| "Creates an `asyncio.Event`" | the dependencies create nothing; they read what the middleware published |
+| [D1](#d1), [D2](#d2), [D4](#d4), [D13](#d13), [D14](#d14), [D10](#d10) undocumented | each has its own section or table row |
 
 ---
 
 # Test gaps
 
-`MockRequest` (`tests/contrib/test_starlette.py:11-24`) and `scripted_receive`
-(`tests/contrib/asgi_harness.py:41-50`) are more forgiving than any real server, and each
-divergence hides a finding:
+The gaps recorded here were all properties of one thing: the original harness was a scripted
+`receive` more forgiving than any real server, so several findings were structurally
+untestable. `tests/contrib/server_harness.py::FakeServer` replaced it and models what the four
+production servers actually do — `more_body` framing, a completion disconnect on a client that
+never left, repeated ([D8](#d8)) vs one-shot delivery, a `receive` that raises, a bounded app
+queue, a selectable or absent `spec_version`, and response trailers ([D17](#d17)). Every
+finding above now has a test, and every entry from the old "missing tests" list exists.
 
-- **Never yields `http.request`** → the discard branch of the loop is never exercised;
-  [D5](#d5) is structurally untestable.
-- **No `response_complete` concept** → [D1](#d1) is invisible. Worse,
-  `test__disconnect_event__when_body_completes__then_listener_cleaned_up` asserts
-  `not event.is_set()` — exactly the assertion a real server fails.
-- **Hangs after one disconnect** → cannot model uvicorn's repeated delivery, nor the one-shot
-  starvation of [D8](#d8).
-- **Never raises** → [D4](#d4) is untestable.
-- **No second reader** and **no `asgi` key in the scope** → [D6](#d6), [D8](#d8), [D9](#d9)
-  invisible. `test_sse_starlette.py` is the one place a real rival reader is exercised.
-- **Unbounded queue** → no analogue of hypercorn's `max_app_queue_size=10`.
+The predicate that decides response completion is deliberately written twice — once in
+`_RequestChannel`, once in `FakeServer`. Sharing it would make the harness agree with the code
+under test by construction, which is exactly the agreement these tests exist to check.
 
-Specific test defects:
+What the harness still cannot show, all of it needing a real server or another event loop:
 
-- `test__route_dependencies__when_also_declared_as_param__then_single_trigger` proves nothing
-  about sharing: both `Depends(disconnect_fencing)` uses share a cache key, so FastAPI solves
-  the dependency **once** (instrumented: `_shared_disconnect_event` entered 1 time). The test
-  would pass identically if the shared-watcher code did not exist. A real test needs two
-  *distinct* callables.
-- Two tests named `..._then_listener_cleaned_up` never assert cleanup — only
-  `not event.is_set()` / `not fence.cancelled`. Neither checks `listener.done()`, task counts,
-  or scope-key release (it is not released).
-- `bound_codes()` reads `Fencing._events`, which `event()` **prepends** to — so the list is
-  reverse-insertion order. Every single-element assertion in `test_fastapi.py` is compatible
-  with the [D2](#d2) collapse, which is why it reads as a plausible `["client_gone"]`.
-
-**Missing tests:** sequential re-entry after teardown; two concurrent entrants; scope key
-released on teardown; two different codes on one request; a `receive` that raises; teardown
-while the enclosing task is cancelled; `DisconnectEvent` + `DisconnectFencing` on one handler;
-sync `def` handler; a `receive` that returns `http.disconnect` on response completion.
+- **[D9](#d9) reentrancy.** `test_middleware_starlette.py` covers `BaseHTTPMiddleware` above
+  and below the middleware, but not user middleware that reads the body after `call_next` —
+  the concurrent `__anext__` that raises `anext(): asynchronous generator is already running`.
+- **The open half of [D16](#d16).** granian h2's `notify_one()` across streams on one TCP
+  connection, granian dropping a materialized chunk when a parked reader is cancelled, and
+  uvicorn 0.43–0.44 waking every parked reader on shutdown. All three are server-internal.
+- **[D14](#d14).** No Trio run, so the asyncio-only failure is asserted nowhere.
+- **Real trailers.** [D17](#d17) is reproduced against `FakeServer`; no server in the dev
+  matrix implements the extension, so the wire behaviour is unverified.

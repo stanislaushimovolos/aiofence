@@ -117,10 +117,14 @@ elif fence.cancelled_by("budget"):
 
 ## Starlette / FastAPI
 
-`disconnect_fencing` binds a client-disconnect trigger to the current `Fencing` context via `bind_fencing()`. When the client disconnects, any active `Fence` — anywhere in the call stack — is cancelled with `code="disconnect"`:
+`DisconnectMiddleware` owns the request's receive channel — one reader, replayed to everything below it — and `disconnect_fencing` binds its disconnect event to the current `Fencing` context via `bind_fencing()`. When the client disconnects, any active `Fence` — anywhere in the call stack — is cancelled with `code="disconnect"`:
 
 ```python
+from starlette.middleware import Middleware
+from aiofence.contrib.starlette import DisconnectMiddleware
 from aiofence.contrib.fastapi import DisconnectFencing
+
+app = FastAPI(middleware=[Middleware(DisconnectMiddleware)])   # outermost, required
 
 @app.get("/work")
 async def handler(fencing: DisconnectFencing):
@@ -134,7 +138,7 @@ async def handler(fencing: DisconnectFencing):
 The real value is that `disconnect_fencing` calls `bind_fencing()` internally, so service-layer code doesn't need to know about HTTP, requests, or disconnect events — it reads the cancellation context via `get_current_fencing()`:
 
 ```python
-from aiofence.contrib.starlette import disconnect_fencing
+from aiofence.contrib.fastapi import disconnect_fencing
 
 # handler — declares cancellation sources at the boundary
 @app.get("/generate", dependencies=[Depends(disconnect_fencing)])
@@ -159,13 +163,13 @@ async def generate_response(prompt: str) -> str:
     return result
 ```
 
-Add `DisconnectMiddleware` at the boundary so the disconnect signal is shared rather than stolen — one reader for the receive channel, replayed to everything below it:
+Code with no dependency and no `Request` to hand can read the event straight from the ambient request:
 
 ```python
-from starlette.middleware import Middleware
-from aiofence.contrib.middleware import DisconnectMiddleware
+from aiofence.contrib.starlette import get_disconnect_event
 
-app = FastAPI(middleware=[Middleware(DisconnectMiddleware)])   # outermost
+async def deep_helper():
+    gone = get_disconnect_event()          # None when the middleware isn't installed
 ```
 
 Requires `starlette` (installed with FastAPI). No additional dependencies.
@@ -182,7 +186,7 @@ Requires `starlette` (installed with FastAPI). No additional dependencies.
 
 **Nested Fences are not supported.** Entering a `Fence` while another is active on the same task raises `RuntimeError`. Use sequential fences or `get_current_fencing()` composition instead. See [#12](https://github.com/stanislaushimovolos/aiofence/issues/12) for details and progress.
 
-**The disconnect dependencies need `DisconnectMiddleware`.** On their own they own the ASGI receive channel: the handler must not read the raw body, streaming responses are unreliable — Starlette's `StreamingResponse` and sse-starlette's `EventSourceResponse` read the same channel and the readers compete — and the event fires when the response completes, not only when the client leaves, so background tasks are cancelled on every successful request. `DisconnectMiddleware` fixes all of it by reading the channel once and replaying it downstream; the dependencies then borrow its event. See [the API guide](docs/api.md#disconnectmiddleware--one-reader-for-the-channel) and the [Disconnect Watcher Analysis](docs/disconnect-watcher-analysis.md).
+**The disconnect dependencies require `DisconnectMiddleware`** and raise `RuntimeError` without it. There is no fallback on purpose: an ASGI receive channel has one useful reader, and anything reading it from below the middleware steals body chunks and streaming messages from the rest of the stack — and cannot tell "the client left" from "the response finished", which cancels background tasks on every successful request. See [the API guide](docs/api.md#why-the-middleware-is-required) and the [Disconnect Watcher Analysis](docs/disconnect-watcher-analysis.md).
 
 ## Requirements
 

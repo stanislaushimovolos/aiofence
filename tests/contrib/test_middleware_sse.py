@@ -3,9 +3,9 @@ D7 — sse-starlette's ``EventSourceResponse`` reads the channel unconditionally
 
 With the middleware replaying the disconnect, its listener and our fencing must
 both fire: the close handler runs, pings stop, the generator aborts, *and*
-``cancelled_by("disconnect")`` is True. ``tests/contrib/test_sse_starlette.py``
-asserts today's broken behaviour (generator running to completion, no close
-handler) — the expectations here are the corrected ones.
+``cancelled_by("disconnect")`` is True. The pre-middleware dependency starved
+that listener — no close handler, generator running to completion — which is
+what these expectations replace.
 See docs/disconnect-watcher-analysis.md.
 """
 
@@ -20,7 +20,7 @@ from sse_starlette.sse import EventSourceResponse
 from starlette.types import Message
 
 from aiofence import Fence, get_current_fencing
-from aiofence.contrib.middleware import DisconnectMiddleware
+from aiofence.contrib.starlette import DisconnectMiddleware
 
 from .server_harness import FakeServer, run_app, serve, wait_for
 

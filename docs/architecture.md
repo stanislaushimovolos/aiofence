@@ -5,9 +5,8 @@
 - **`core.py`** — abstractions and core runtime: `CancelReason`, `CancelType`, `Trigger`, `TriggerHandle`, `Fence`, `_CancelToken`
 - **`triggers/`** — built-in trigger implementations: `TimeoutTrigger`/`TimeoutHandle`, `EventTrigger`/`EventHandle`
 - **`contrib/`** — optional framework integrations (Starlette / FastAPI). Never imported by the core package, so it stays dependency-free; see [api.md](api.md)
-  - **`contrib/middleware.py`** — `DisconnectMiddleware`, the single reader of a request's ASGI receive channel: `_RequestChannel` pumps the channel, replays body messages, latches the disconnect, and publishes the event at `scope["aiofence.disconnect_event"]`
-  - **`contrib/starlette.py`** — `disconnect_event` / `disconnect_fencing` dependencies. They borrow the middleware's event when it is installed, and fall back to their own reference-counted watch when it isn't
-  - **`contrib/fastapi.py`** — `DisconnectEvent` / `DisconnectFencing` annotated aliases
+  - **`contrib/starlette.py`** — `DisconnectMiddleware`, the single reader of a request's ASGI receive channel: `_RequestChannel` pumps the channel, replays body messages, latches the disconnect, and publishes the event at `scope["aiofence.disconnect_event"]` and in a `ContextVar`. `get_disconnect_event` / `require_disconnect_event` read it back, with or without a scope
+  - **`contrib/fastapi.py`** — `disconnect_event` / `disconnect_fencing` / `disconnect_fencing_dependency` and the `DisconnectEvent` / `DisconnectFencing` aliases. Pure readers of what the middleware published; they raise `RuntimeError` when it isn't installed
 - **`__init__.py`** — public re-exports
 
 ## API
@@ -106,13 +105,15 @@ Wire protocol is always relative duration. Each service converts to local timeou
 
 ## Disconnect Delivery: Replay and Latch
 
-`DisconnectMiddleware` exists because an ASGI receive channel has exactly one useful reader — `receive()` is a queue pop, not a broadcast — while a request routinely has several interested parties: the disconnect dependency, `StreamingResponse`'s `listen_for_disconnect`, sse-starlette's listener, `Request.is_disconnected()`. Whoever reads first consumes the message; on hypercorn, daphne and granian it is delivered exactly once, so everyone else starves. A dependency cannot arbitrate: Starlette captures the raw `receive` before any dependency runs, so there is no reference left to wrap. Only a middleware sits above all of them.
+`DisconnectMiddleware` exists because an ASGI receive channel has exactly one useful reader — `receive()` is a queue pop, not a broadcast — while a request routinely has several interested parties: `StreamingResponse`'s `listen_for_disconnect`, sse-starlette's listener, `Request.is_disconnected()`, and anything wanting to know the client left. Whoever reads first consumes the message; on hypercorn, daphne and granian it is delivered exactly once, so everyone else starves. A dependency cannot arbitrate: Starlette captures the raw `receive` before any dependency runs, so there is no reference left to wrap. Only a middleware sits above all of them.
 
 Three properties make the arbitration correct, and each is load-bearing:
 
 - **Replay, don't discard.** The pump forwards every `http.request` message downstream in order and unchanged. The alternative — the dependency's watcher, which discards anything that isn't a disconnect — steals body chunks, and the loser of that race gets `{"body": b"", "more_body": False}`, which Starlette accepts as a *complete, empty* body. Silent truncation, no exception, no log.
 - **Latch, don't queue.** The disconnect is a terminal side channel: recorded once and answered on every later `receive()`, never queued behind body chunks. That turns a one-shot server delivery into a signal every reader below can observe, and it keeps the middleware from needing a bounded queue of its own. Draining the server's queue also matters in itself — hypercorn bounds its app queue at 10 messages and blocks the connection when it fills.
 - **Track `response_complete` in a wrapped `send`.** Per the ASGI spec `http.disconnect` means "the stream ended", not "the client left": every server sends it once the response is complete. The middleware flips its flag *before* handing the terminal message to the server's `send`, because the pump can only be woken by the server having processed that message. A disconnect latched after that point is replayed downstream but does **not** set the event — which is what keeps `BackgroundTasks` and post-response work from being cancelled on every successful request. This is the only place in the stack where the two meanings can be told apart.
+
+"Terminal message" is not always the final body one. When `http.response.start` declares `"trailers": True`, the response is not complete until the last `http.response.trailers` message, and a client that leaves in between has genuinely left. The wrapped `send` tracks the declaration so the flag flips at the real end of the response rather than one message early.
 
 The pump stops as soon as it latches a disconnect: uvicorn re-delivers the message immediately and forever, so reading past it would spin for the rest of the request, background-task phase included.
 
