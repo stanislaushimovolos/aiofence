@@ -26,6 +26,7 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.requests import ClientDisconnect, Request
 from starlette.responses import Response, StreamingResponse
 from starlette.routing import Route
+from starlette.types import Scope
 
 from aiofence import Fence, get_current_fencing
 from aiofence.contrib.starlette import DisconnectMiddleware, get_disconnect_event
@@ -566,3 +567,47 @@ async def test__exception_handler__when_client_left_first__then_event_is_set() -
 
 async def _passthrough(request: Request, call_next: RequestResponseEndpoint) -> Response:
     return await call_next(request)
+
+
+# --- on_disconnect sees the routed scope ---
+
+
+async def test__on_disconnect__when_route_matched__then_scope_carries_route_template() -> None:
+    """Routing mutates the scope in place, so the hook gets labels, not raw paths."""
+    app = FastAPI()
+    server = FakeServer(path="/items/42")
+    entered = asyncio.Event()
+    labels: list[tuple[str, str]] = []
+
+    @app.get("/items/{item_id}")
+    async def endpoint(item_id: int, request: Request) -> Response:
+        entered.set()
+        await wait_for(get_disconnect_event(request.scope))
+        return Response("ok")
+
+    def hook(scope: Scope) -> None:
+        labels.append((scope["path"], scope["route"].path))
+
+    async with serve(DisconnectMiddleware(app, on_disconnect=hook), server):
+        await wait_for(entered)
+        server.disconnect()
+
+    assert labels == [("/items/42", "/items/{item_id}")]
+
+
+async def test__watch__when_called__then_route_not_in_scope_yet() -> None:
+    """The predicate runs above the router: raw path only, never a template."""
+    app = FastAPI()
+    keys: list[bool] = []
+
+    @app.get("/items/{item_id}")
+    async def endpoint(item_id: int) -> Response:
+        return Response("ok")
+
+    def watch(scope: Scope) -> bool:
+        keys.append("route" in scope or "endpoint" in scope)
+        return True
+
+    await run_app(DisconnectMiddleware(app, watch=watch), FakeServer(path="/items/42"))
+
+    assert keys == [False]
