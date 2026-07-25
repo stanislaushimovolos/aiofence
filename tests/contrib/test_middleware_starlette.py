@@ -54,7 +54,7 @@ def starlette_app(
     return Starlette(
         routes=[Route("/work", endpoint, methods=list(methods))],
         middleware=[
-            Middleware(DisconnectMiddleware, fencing_code="disconnect"),
+            Middleware(DisconnectMiddleware),
             *middleware,
         ],
         exception_handlers=exception_handlers,
@@ -229,7 +229,7 @@ async def test__request_body__when_body_arrives_after_headers__then_returns_exac
 async def test__fastapi_handler__when_request_is_the_only_param__then_body_read_intact() -> None:
     """No declared body param means FastAPI never pre-reads and caches it."""
     app = FastAPI()
-    app.add_middleware(DisconnectMiddleware, fencing_code="disconnect")
+    app.add_middleware(DisconnectMiddleware)
 
     @app.post("/work")
     async def work(request: Request) -> dict[str, str]:
@@ -440,7 +440,7 @@ async def test__base_http_middleware__when_above__then_disconnect_reaches_the_fe
         routes=[Route("/work", endpoint)],
         middleware=[
             Middleware(BaseHTTPMiddleware, dispatch=_passthrough),
-            Middleware(DisconnectMiddleware, fencing_code="disconnect"),
+            Middleware(DisconnectMiddleware),
         ],
     )
     async with serve(app, server):
@@ -462,7 +462,7 @@ async def test__base_http_middleware__when_above__then_body_reaches_the_handler(
         routes=[Route("/work", endpoint, methods=["POST"])],
         middleware=[
             Middleware(BaseHTTPMiddleware, dispatch=_passthrough),
-            Middleware(DisconnectMiddleware, fencing_code="disconnect"),
+            Middleware(DisconnectMiddleware),
         ],
     )
     await run_app(app, FakeServer(method="POST", body=[PAYLOAD[:12], PAYLOAD[12:]]))

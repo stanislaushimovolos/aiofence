@@ -32,22 +32,23 @@ the channel exactly once and replays what it read to everyone below.
   and unchanged. A watcher that discards non-disconnect messages steals body chunks, and the
   loser of that race receives `{"body": b"", "more_body": False}` — which Starlette accepts
   as a *complete, empty* body. Silent truncation: no exception, no log.
-- **Latch, don't queue.** The disconnect is recorded once and answered on every later
-  `receive()`, never queued behind body chunks. That turns a one-shot server delivery into a
+- **Record, don't queue.** The disconnect is recorded once and answered on every later
+  `receive()` — recorded rather than queued as a message the first reader would consume.
+  Buffered body messages are still handed over first; the event itself is set at once. That turns a one-shot server delivery into a
   signal every reader below can observe. Draining the server's queue matters in itself —
   hypercorn bounds its app queue at 10 messages and blocks the connection when it fills.
-- **Track `response_complete` in a wrapped `send`.** This is the only place in the stack
+- **Track response completion in a wrapped `send`.** This is the only place in the stack
   where property 2's two meanings can be told apart. The flag flips *before* the terminal
-  message reaches the server's `send`, because the pump can only be woken by the server
-  having processed it. A disconnect latched afterwards is replayed downstream but does not
+  message reaches the server's `send`, because the read loop can only be woken by the server
+  having processed it. A disconnect recorded afterwards is replayed downstream but does not
   set the event — which is what keeps `BackgroundTasks` alive on successful requests. When
   `http.response.start` declares `"trailers": True`, the response ends at the final
   `http.response.trailers`, not the final body message.
-- **Latch `receive` errors.** A raising channel is re-raised from the next downstream
-  `receive()`, where the application actually reads, and never replaces the application's own
+- **Record `receive` errors.** A raising channel is re-raised from the next downstream
+  `receive()` once the buffered body is drained, where the application actually reads, and never replaces the application's own
   exception. The event is *not* set: a broken channel is not evidence the client left.
 
-The pump stops as soon as it latches a disconnect — uvicorn re-delivers the message
+The read loop stops as soon as it records a disconnect — uvicorn re-delivers the message
 immediately and forever, so reading past it would spin for the rest of the request.
 
 Replay settles that both readers are *told*, not which acts first. A fenced streaming body
@@ -86,7 +87,7 @@ them by number; the full reproductions are in git history at `4e6f414`.
 | D10 | No version floor for the teardown ordering the design relies on | closed — `fastapi>=0.118` / `starlette>=0.42` |
 | D11 | `Depends(..., scope="function")` inverts the LIFO invariant | moot — dependencies own no watch |
 | D12 | Sync `def` handlers cannot enter a fence | **open, documented** — FastAPI structural |
-| D13 | Exception handlers see no *dependency-bound* fencing | **partial** — use the middleware's `fencing_code` |
+| D13 | Exception handlers see no *dependency-bound* fencing | closed — the middleware binds the fencing itself by default |
 | D14 | asyncio-only primitives, no Trio guard | **open by design** — `Fencing.event()` is typed against `asyncio.Event` |
 | D15 | `asyncio.shield` in teardown was inert and hid one error path | closed |
 | D16 | Version-bounded and server-specific hazards | **partial** — see below |

@@ -117,31 +117,28 @@ elif fence.cancelled_by("budget"):
 
 ## Starlette / FastAPI
 
-`DisconnectMiddleware` owns the request's receive channel — one reader, replayed to everything below it — and `disconnect_fencing` binds its disconnect event to the current `Fencing` context via `bind_fencing()`. When the client disconnects, any active `Fence` — anywhere in the call stack — is cancelled with `code="disconnect"`:
+`DisconnectMiddleware` owns the request's receive channel — one reader, replayed to everything below it — and binds its disconnect event to the current `Fencing` context via `bind_fencing()` for the whole request. Installing it is the whole setup: when the client disconnects, any fence created from `get_current_fencing()` — anywhere in the call stack — is cancelled with `code="disconnect"` (`DISCONNECT_CODE`). Declaring `DisconnectFencing` on a route is optional, and only needed for a per-route code:
 
 ```python
 from starlette.middleware import Middleware
-from aiofence.contrib.starlette import DisconnectMiddleware
-from aiofence.contrib.fastapi import DisconnectFencing
+from aiofence.contrib.starlette import DISCONNECT_CODE, DisconnectMiddleware
 
 app = FastAPI(middleware=[Middleware(DisconnectMiddleware)])   # outermost, required
 
 @app.get("/work")
-async def handler(fencing: DisconnectFencing):
-    with fencing.timeout(30, code="budget").move_on_cancel() as fence:
+async def handler():
+    with get_current_fencing().timeout(30, code="budget").move_on_cancel() as fence:
         await long_work()
 
-    if fence.cancelled_by("disconnect"):
+    if fence.cancelled_by(DISCONNECT_CODE):
         return Response(status_code=499)
 ```
 
-The real value is that `disconnect_fencing` calls `bind_fencing()` internally, so service-layer code doesn't need to know about HTTP, requests, or disconnect events — it reads the cancellation context via `get_current_fencing()`:
+The real value is that the binding is ambient, so service-layer code doesn't need to know about HTTP, requests, or disconnect events — it reads the cancellation context via `get_current_fencing()`:
 
 ```python
-from aiofence.contrib.fastapi import disconnect_fencing
-
-# handler — declares cancellation sources at the boundary
-@app.get("/generate", dependencies=[Depends(disconnect_fencing)])
+# handler — no fencing wiring at the boundary either
+@app.get("/generate")
 async def handler(prompt: str):
     result = await generate_response(prompt)
     return {"status": "ok", "result": result}

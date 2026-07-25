@@ -48,7 +48,7 @@ class SseProbe:
 
     def _build_app(self) -> FastAPI:
         app = FastAPI()
-        app.add_middleware(DisconnectMiddleware, fencing_code="disconnect")
+        app.add_middleware(DisconnectMiddleware)
 
         async def on_close(message: Message) -> None:
             self.closed.append(message["type"])
@@ -151,7 +151,7 @@ async def test__sse_response__when_stream_completes__then_every_event_reaches_th
     that nobody interrupts still arrives intact through the wrapped ``send``.
     """
     app = FastAPI()
-    app.add_middleware(DisconnectMiddleware, fencing_code="disconnect")
+    app.add_middleware(DisconnectMiddleware)
 
     async def events() -> AsyncIterator[str]:
         for item in ("first", "second", "third"):

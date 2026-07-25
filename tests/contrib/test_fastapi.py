@@ -24,6 +24,7 @@ from aiofence.contrib.fastapi import (
     disconnect_fencing,
     disconnect_fencing_dependency,
 )
+from aiofence.contrib.starlette import DISCONNECT_CODE
 
 from .asgi_harness import (
     bound_codes,
@@ -60,6 +61,30 @@ async def test__disconnect_event_alias__when_middleware_missing__then_request_ra
         await call_app(app)
 
 
+# --- the middleware's own binding ---
+
+
+async def test__middleware_default__when_no_dependency__then_fencing_bound_in_handler() -> None:
+    app = fenced_app()
+
+    @app.get("/work")
+    async def work() -> dict[str, Any]:
+        return {"codes": bound_codes()}
+
+    assert await call_app(app) == {"codes": [DISCONNECT_CODE]}
+
+
+async def test__middleware_default__when_dependency_declared__then_one_entry() -> None:
+    """Same event, same code — ``Fencing.event`` dedupes instead of reporting twice."""
+    app = fenced_app()
+
+    @app.get("/work", dependencies=[Depends(disconnect_fencing)])
+    async def work() -> dict[str, Any]:
+        return {"entries": len(get_current_fencing()._events)}
+
+    assert await call_app(app) == {"entries": 1}
+
+
 # --- binding via FastAPI's dependencies=[...] ---
 
 
@@ -93,7 +118,7 @@ async def test__router_dependencies__when_custom_code__then_uses_it() -> None:
     app = fenced_app()
     app.include_router(router)
 
-    assert await call_app(app) == {"codes": ["client_gone"]}
+    assert await call_app(app) == {"codes": ["client_gone", DISCONNECT_CODE]}
 
 
 async def test__route_dependencies__when_nested_callee__then_fencing_propagates() -> None:

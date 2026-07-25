@@ -19,6 +19,7 @@ from starlette.types import Message, Receive, Scope, Send
 
 from aiofence import get_current_fencing
 from aiofence.contrib.starlette import (
+    DISCONNECT_CODE,
     DISCONNECT_EVENT_SCOPE_KEY,
     DisconnectMiddleware,
     get_disconnect_event,
@@ -202,7 +203,7 @@ async def test__middleware__when_work_runs_after_response__then_fence_not_pre_tr
             await asyncio.sleep(0.01)
         outcome["completed"] = not fence.cancelled
 
-    await run_app(DisconnectMiddleware(app, fencing_code="disconnect"), server)
+    await run_app(DisconnectMiddleware(app), server)
 
     assert outcome == {"completed": True}
 
@@ -237,7 +238,7 @@ async def test__middleware__when_client_disconnects_before_response__then_fence_
         observed.append(fence.cancelled_by("disconnect"))
         await respond(send)
 
-    async with serve(DisconnectMiddleware(app, fencing_code="disconnect"), server):
+    async with serve(DisconnectMiddleware(app), server):
         await wait_for(entered)
         server.disconnect()
 
@@ -353,7 +354,7 @@ async def test__middleware__when_downstream_reads_after_suspension__then_body_in
     read: list[bytes] = []
 
     async def app(scope: Scope, receive: Receive, send: Send) -> None:
-        await asyncio.sleep(0.01)  # the pump is parked in receive() by now
+        await asyncio.sleep(0.01)  # the channel reader is parked in receive() by now
         read.append(await read_body(receive))
         await respond(send)
 
@@ -696,7 +697,7 @@ async def test__middleware__when_outer_task_cancelled__then_no_tasks_leaked() ->
     assert len(asyncio.all_tasks()) == before
 
 
-async def test__middleware__when_installed_once__then_runs_a_single_pump_task() -> None:
+async def test__middleware__when_installed_once__then_runs_a_single_reader_task() -> None:
     counted: list[int] = []
 
     async def app(scope: Scope, receive: Receive, send: Send) -> None:
@@ -709,7 +710,7 @@ async def test__middleware__when_installed_once__then_runs_a_single_pump_task() 
     assert counted == [before + 1]
 
 
-async def test__middleware__when_installed_twice__then_runs_a_single_pump_task() -> None:
+async def test__middleware__when_installed_twice__then_runs_a_single_reader_task() -> None:
     counted: list[int] = []
 
     async def app(scope: Scope, receive: Receive, send: Send) -> None:
@@ -771,16 +772,18 @@ async def test__middleware__when_fencing_code_set__then_fencing_bound_for_the_re
     assert codes == [["client_gone"]]
 
 
-async def test__middleware__when_fencing_code_unset__then_nothing_bound() -> None:
+async def test__middleware__when_fencing_code_omitted__then_default_code_bound() -> None:
     codes: list[list[str | None]] = []
 
     async def app(scope: Scope, receive: Receive, send: Send) -> None:
         codes.append(bound_codes())
         await respond(send)
 
+    assert DISCONNECT_CODE == "disconnect"
+
     await run_app(DisconnectMiddleware(app), FakeServer())
 
-    assert codes == [[]]
+    assert codes == [[DISCONNECT_CODE]]
 
 
 async def test__middleware__when_fencing_code_set__then_bound_event_is_the_published_one() -> None:
@@ -791,7 +794,7 @@ async def test__middleware__when_fencing_code_set__then_bound_event_is_the_publi
         matched.append(events == [published_event(scope)])
         await respond(send)
 
-    await run_app(DisconnectMiddleware(app, fencing_code="disconnect"), FakeServer())
+    await run_app(DisconnectMiddleware(app), FakeServer())
 
     assert matched == [True]
 
@@ -800,6 +803,6 @@ async def test__middleware__when_request_ends__then_fencing_binding_released() -
     async def app(scope: Scope, receive: Receive, send: Send) -> None:
         await respond(send)
 
-    await run_app(DisconnectMiddleware(app, fencing_code="disconnect"), FakeServer())
+    await run_app(DisconnectMiddleware(app), FakeServer())
 
     assert bound_codes() == []
