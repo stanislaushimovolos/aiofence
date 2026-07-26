@@ -1,0 +1,27 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+
+# Packaging
+build/
+dist/
+*.egg-info/
+
+# Virtualenvs
+.venv/
+.venv-*/
+
+# Tool caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Coverage
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Editors
+.idea/
+.vscode/
