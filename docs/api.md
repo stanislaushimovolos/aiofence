@@ -505,6 +505,23 @@ Both the scope key and the context binding are dropped when the request ends, so
 
 What replay settles is that both readers are *told*. Which one acts first is still a scheduling matter, and a fenced body legitimately outlives its rival listener's cancel scope: `move_on_cancel()` suppressed the cancellation on purpose, so the generator resumes and emits its last chunk. An unfenced body is still torn down by the rival listener, as before.
 
+##### Fencing a raw body read
+
+A fence around `await request.body()` has two exits, so catch both:
+
+```python
+try:
+    with get_current_fencing().move_on_cancel() as fence:
+        payload = await request.body()
+except ClientDisconnect:                       # client left before the fence was entered
+    return Response(status_code=499)
+
+if fence.cancelled_by(DISCONNECT_CODE):        # client left while the read was parked
+    return Response(status_code=499)
+```
+
+Which one you get depends on whether the read was already parked when the client left. Parked, the fence wins: recording a disconnect sets the event *before* waking the reader, so the fence's cancel is queued ahead of the reply. Entered afterwards, the fence's cancel is only scheduled (see [Deferred Cancel](architecture.md#deferred-cancel-via-call_soon)) while the buffered body and the recorded disconnect are answered from state without suspending — Starlette raises `ClientDisconnect` first. Plain uvicorn behaves the same way: its `receive()` skips its own `await` once the connection is gone. Fences around anything other than a channel read are unaffected.
+
 #### The middleware's own binding
 
 The middleware does not only publish the event — it binds it on `get_current_fencing()` under `DISCONNECT_CODE`, for the whole request. Installing it *is* the opt-in, so there is no mode where it owns the channel but signals nothing:
