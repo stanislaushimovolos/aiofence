@@ -8,6 +8,8 @@
 
 Multi-reason cancellation contexts for Python asyncio. Inspired by Go's `context.Context`, `aiofence` provides a cancellation context that propagates hierarchically through your application via `ContextVar` — no need to thread events, flags, or tokens through every call signature. Declare cancellation sources once at the boundary — inner code just wraps cancellable work in a context manager and doesn't care about the actual reasons, though it can inspect them if needed.
 
+**The flagship use case is client disconnect.** An inference or agent service burns GPU time and provider spend on requests nobody is listening to any more, and ASGI gives you exactly one shot at noticing. `DisconnectMiddleware` turns that one-shot signal into an ambient cancellation source, so any code below it can stop the work the moment the client goes away — with no `Request` in its signature and no wiring through the call stack. See [Client disconnects](#client-disconnects).
+
 ## Motivation
 
 `asyncio` has been steadily adopting structured concurrency patterns — `TaskGroup` (3.11) and `asyncio.timeout()` (3.11) both came from `trio` and `anyio`. But one gap remains: `asyncio` can cancel tasks mechanically, but it can't tell you *why* you were cancelled, doesn't offer a non-raising timeout (`move_on_after`), and forces you to propagate cancellation sources through every call signature. When multiple sources exist (timeout, client disconnect, graceful shutdown), it gets messy fast:
@@ -115,9 +117,9 @@ elif fence.cancelled_by("budget"):
 
 **Native asyncio** — works with asyncio's `cancel()`/`uncancel()` counter protocol. Compatible with `TaskGroup`, `asyncio.timeout()`. No new runtime, no dependencies.
 
-## Starlette / FastAPI
+## Client disconnects
 
-`DisconnectMiddleware` owns the request's receive channel — one reader, replayed to everything below it — and binds its disconnect event to the current `Fencing` context via `bind_fencing()` for the whole request. Installing it is the whole setup: when the client disconnects, any fence created from `get_current_fencing()` — anywhere in the call stack — is cancelled with `code="disconnect"` (`DISCONNECT_CODE`). Declaring `DisconnectFencing` on a route is optional, and only needed for a per-route code:
+For Starlette and FastAPI, this is what `aiofence` is mainly built for. `DisconnectMiddleware` owns the request's receive channel — one reader, replayed to everything below it — and binds its disconnect event to the current `Fencing` context via `bind_fencing()` for the whole request. Installing it is the whole setup: when the client disconnects, any fence created from `get_current_fencing()` — anywhere in the call stack — is cancelled with `code="disconnect"` (`DISCONNECT_CODE`). Declaring `DisconnectFencing` on a route is optional, and only needed for a per-route code:
 
 ```python
 from starlette.middleware import Middleware
@@ -169,6 +171,18 @@ async def deep_helper():
     gone = get_disconnect_event()          # None when the middleware isn't installed
 ```
 
+### Why this is the hard part
+
+An ASGI receive channel has exactly one useful reader — `receive()` is a queue pop, not a broadcast — while a request routinely has several interested parties: `StreamingResponse`'s disconnect listener, sse-starlette's, `Request.is_disconnected()`, and your own code. Three properties make the arbitration correct, and hand-rolled watchers usually miss at least one:
+
+- **One reader, above everything else.** On hypercorn, daphne and granian `http.disconnect` is delivered exactly once, so whoever reads it first consumes it and every other listener starves. A dependency cannot arbitrate — Starlette captures the raw `receive` before any dependency runs, so there is no reference left to wrap. Only a middleware sits above all of them.
+
+- **Replay, don't discard.** The usual watcher loop drops everything that isn't a disconnect, which steals body chunks: the loser of that race gets `{"body": b"", "more_body": False}`, and Starlette accepts it as a *complete, empty* body. Silent truncation, no exception, no log. `DisconnectMiddleware` forwards every message downstream in order and unchanged.
+
+- **"Stream ended" is not "client left".** Per the ASGI spec `http.disconnect` means the stream ended, and every server sends it once the response is complete. A watcher that can't tell the two apart fires on every successful request — and takes `BackgroundTasks` down with it. The middleware tracks response completion in a wrapped `send`, so only a disconnect arriving *before* the response finished sets the event.
+
+Full reasoning in [Disconnect Delivery — Design Rationale](docs/disconnect-watcher-analysis.md) and [Architecture](docs/architecture.md#disconnect-delivery-replay-and-record).
+
 Requires `starlette` (installed with FastAPI). No additional dependencies.
 
 ## Documentation
@@ -183,7 +197,7 @@ Requires `starlette` (installed with FastAPI). No additional dependencies.
 
 **Nested Fences are not supported.** Entering a `Fence` while another is active on the same task raises `RuntimeError`. Use sequential fences or `get_current_fencing()` composition instead. See [#12](https://github.com/stanislaushimovolos/aiofence/issues/12) for details and progress.
 
-**The disconnect dependencies require `DisconnectMiddleware`** and raise `RuntimeError` without it. There is no fallback on purpose: an ASGI receive channel has one useful reader, and anything reading it from below the middleware steals body chunks and streaming messages from the rest of the stack — and cannot tell "the client left" from "the response finished", which cancels background tasks on every successful request. See [the API guide](docs/api.md#why-the-middleware-is-required) and the [Disconnect Watcher Analysis](docs/disconnect-watcher-analysis.md).
+**The disconnect dependencies require `DisconnectMiddleware`** and raise `RuntimeError` without it. There is no fallback on purpose — see [Why this is the hard part](#why-this-is-the-hard-part) and [the API guide](docs/api.md#why-the-middleware-is-required).
 
 ## Requirements
 

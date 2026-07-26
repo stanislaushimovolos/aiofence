@@ -242,6 +242,87 @@ async def test__fastapi_handler__when_request_is_the_only_param__then_body_read_
     assert json.loads(body) == {"raw": PAYLOAD.decode(), "codes": "disconnect"}
 
 
+# --- fenced body reads ---
+
+
+async def test__fenced_body_read__when_client_leaves_while_parked__then_fence_suppresses() -> None:
+    """
+    The channel sets the event before waking the parked reader, so the fence's
+    cancel is queued ahead of the reply and arrives instead of it.
+    """
+    outcome = await _fenced_upload_cut(enter_fence_after_cut=False)
+
+    assert outcome == {"cancelled_by_disconnect": True, "suppressed": True}
+
+
+async def test__fenced_body_read__when_client_left_first__then_raises_client_disconnect() -> None:
+    """
+    Nothing to wake: the fence's cancel is only scheduled, and both the buffered
+    chunk and the recorded disconnect are answered without suspending, so
+    Starlette raises before the cancel can land. Same as reading unfenced under
+    plain uvicorn, whose ``receive()`` also skips its ``await`` once disconnected.
+    """
+    outcome = await _fenced_upload_cut(enter_fence_after_cut=True)
+
+    assert outcome == {"client_disconnect": True}
+
+
+async def _fenced_upload_cut(*, enter_fence_after_cut: bool) -> dict[str, bool]:
+    """Cut the client mid-upload, either while the fenced read is parked or before it."""
+    server = FakeServer(method="POST", defer_body=True, content_length=len(PAYLOAD))
+    reading = asyncio.Event()
+    cut = asyncio.Event()
+    outcome: dict[str, bool] = {}
+
+    async def endpoint(request: Request) -> Response:
+        reading.set()
+        if enter_fence_after_cut:
+            await wait_for(cut)
+
+        try:
+            with get_current_fencing().move_on_cancel() as fence:
+                await request.body()
+        except ClientDisconnect:
+            outcome["client_disconnect"] = True
+            return Response(b"ok")
+
+        outcome["cancelled_by_disconnect"] = fence.cancelled_by("disconnect")
+        outcome["suppressed"] = fence.suppressed
+        return Response(b"ok")
+
+    async with serve(starlette_app(endpoint, methods=["POST"]), server):
+        await wait_for(reading)
+        await server.feed_body(PAYLOAD[:5], more_body=True)
+        await asyncio.sleep(0.01)
+        server.disconnect()
+        await asyncio.sleep(0.01)
+        cut.set()
+
+    return outcome
+
+
+async def test__fenced_body_read__when_body_complete_before_the_cut__then_bytes_intact() -> None:
+    """A fully buffered body is handed over from the buffer, so nothing suspends."""
+    server = FakeServer(method="POST", defer_body=True, content_length=len(PAYLOAD))
+    cut = asyncio.Event()
+    read: list[bytes] = []
+
+    async def endpoint(request: Request) -> Response:
+        await wait_for(cut)
+        with get_current_fencing().move_on_cancel():
+            read.append(await request.body())
+        return Response(b"ok")
+
+    async with serve(starlette_app(endpoint, methods=["POST"]), server):
+        await server.feed_body(PAYLOAD, more_body=False)
+        await asyncio.sleep(0.01)
+        server.disconnect()
+        await asyncio.sleep(0.01)
+        cut.set()
+
+    assert read == [PAYLOAD]
+
+
 # --- D6: Starlette's own StreamingResponse listener ---
 
 
