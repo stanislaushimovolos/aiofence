@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -30,6 +31,9 @@ class CancelReason:
 
 
 CancelCallback = Callable[[CancelReason], None]
+CancelPolicy = Callable[[CancelReason], bool]
+
+logger = logging.getLogger("aiofence")
 
 _active_fences: WeakKeyDictionary[asyncio.Task[Any], Fence] = WeakKeyDictionary()
 
@@ -73,13 +77,19 @@ class Fence:
     the block. This keeps the cancel counter balanced and avoids
     CancelledError-with-counter-zero, which would confuse TaskGroup
     and nested asyncio.timeout scopes.
+
+    `policy` is consulted once per reason before the cancel is delivered.
+    A reason it rejects is recorded in `declined_reasons` and does not
+    cancel; a policy that raises is logged and treated as accepting.
     """
 
-    def __init__(self, *triggers: Trigger) -> None:
+    def __init__(self, *triggers: Trigger, policy: CancelPolicy | None = None) -> None:
         self._triggers = triggers
+        self._policy = policy
         self._current_task: asyncio.Task[Any] | None = None
         self._exit_handlers: list[TriggerHandle] = []
         self._cancel_reasons: list[CancelReason] = []
+        self._declined_reasons: list[CancelReason] = []
         self._cancel_token: _CancelToken | None = None
         self._cancelling: int | None = None
         self._armed = False
@@ -110,6 +120,16 @@ class Fence:
     def cancelled_by(self, code: str) -> bool:
         return any(r.code == code for r in self._cancel_reasons)
 
+    @property
+    def declined_reasons(self) -> tuple[CancelReason, ...]:
+        """
+        Reasons that fired but were rejected by the policy. Never cancel.
+        """
+        return tuple(self._declined_reasons)
+
+    def declined_by(self, code: str) -> bool:
+        return any(r.code == code for r in self._declined_reasons)
+
     def __enter__(self) -> Self:
         if self._exited or self._current_task is not None:
             raise RuntimeError("Fence cannot be reused")
@@ -135,7 +155,7 @@ class Fence:
         for source in self._triggers:
             reason = source.check()
             if reason is not None:
-                self._cancel_reasons.append(reason)
+                self._admit(reason)
 
         if self._cancel_reasons:
             # 3.12: uncancel() doesn't clear _must_cancel, so calling
@@ -176,8 +196,30 @@ class Fence:
             self._exit_handlers = []
 
     def _on_trigger(self, reason: CancelReason) -> None:
-        self._cancel_reasons.append(reason)
-        self._cancel()
+        if self._admit(reason):
+            self._cancel()
+
+    def _admit(self, reason: CancelReason) -> bool:
+        """
+        Route a reason through the policy into `cancel_reasons` or
+        `declined_reasons`. Returns True when the reason should cancel.
+        """
+        if self._accepts(reason):
+            self._cancel_reasons.append(reason)
+            return True
+
+        self._declined_reasons.append(reason)
+        return False
+
+    def _accepts(self, reason: CancelReason) -> bool:
+        if self._policy is None:
+            return True
+
+        try:
+            return self._policy(reason)
+        except Exception:
+            logger.exception("Cancel policy raised for %r; delivering the cancel", reason)
+            return True
 
     def _cancel(self) -> None:
         """

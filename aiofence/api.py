@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
-from .core import CancelReason, Fence, Trigger
+from .core import CancelPolicy, CancelReason, Fence, Trigger
 from .triggers import EventTrigger, TimeoutTrigger
 
 _current_fencing: ContextVar[Fencing | None] = ContextVar("current_fencing", default=None)
@@ -30,6 +30,8 @@ class FenceCancelled(Exception):  # noqa: N818
             CancelledError. False if a trigger fired but the body
             completed before cancellation was delivered.
         cancel_reasons: All trigger reasons that fired.
+        declined_reasons: Reasons the fence's policy rejected; they never
+            cancelled anything.
     """
 
     def __init__(
@@ -37,13 +39,18 @@ class FenceCancelled(Exception):  # noqa: N818
         cancel_reasons: tuple[CancelReason, ...],
         *,
         suppressed: bool,
+        declined_reasons: tuple[CancelReason, ...] = (),
     ) -> None:
         self.cancel_reasons = cancel_reasons
         self.suppressed = suppressed
+        self.declined_reasons = declined_reasons
         super().__init__(self._format_message())
 
     def cancelled_by(self, code: str) -> bool:
         return any(r.code == code for r in self.cancel_reasons)
+
+    def declined_by(self, code: str) -> bool:
+        return any(r.code == code for r in self.declined_reasons)
 
     def _format_message(self) -> str:
         if len(self.cancel_reasons) == 1:
@@ -60,7 +67,7 @@ class Fencing:
     making it one-shot (raises on reuse).
     """
 
-    __slots__ = ("_anchored", "_deadline", "_deadline_code", "_events", "_used")
+    __slots__ = ("_anchored", "_deadline", "_deadline_code", "_events", "_policy", "_used")
 
     def __init__(
         self,
@@ -68,11 +75,13 @@ class Fencing:
         _deadline: float | None = None,
         _deadline_code: str | None = None,
         _events: tuple[_EventEntry, ...] = (),
+        _policy: CancelPolicy | None = None,
         _anchored: bool = False,
     ) -> None:
         self._events = _events
         self._deadline = _deadline
         self._deadline_code = _deadline_code
+        self._policy = _policy
         self._anchored = _anchored
         self._used = False
 
@@ -124,6 +133,43 @@ class Fencing:
         existing = tuple(e for e in self._events if e != new_entry)
         return self._derive(_events=(new_entry, *existing))
 
+    def guard(self, policy: CancelPolicy) -> Fencing:
+        """
+        Consult ``policy`` for every reason before its cancel is delivered.
+        ``True`` delivers, ``False`` declines: the reason is recorded in
+        ``fence.declined_reasons`` and nothing is cancelled.
+
+        Guards compose with AND — a guard added to a builder that already
+        has one can only decline more, never less — and are inherited by
+        every Fencing derived from this one.
+
+        Args:
+            policy: Sync, cheap callable; it runs inside the event loop
+                    callback. An exception is logged and counts as ``True``.
+        """
+        if self._policy is None:
+            return self._derive(_policy=policy)
+
+        return self._derive(_policy=_both(self._policy, policy))
+
+    def unless(self, precondition: Callable[[], bool], *, code: str | None = None) -> Fencing:
+        """
+        Decline cancellation while ``precondition()`` holds at fire time.
+
+        Args:
+            precondition: Sync callable checked once per reason.
+            code: Only reasons carrying this code are subject to the
+                  precondition; other reasons cancel as usual. Omitted,
+                  every reason on the fence is — timeouts included.
+        """
+
+        def policy(reason: CancelReason) -> bool:
+            if code is not None and reason.code != code:
+                return True
+            return not precondition()
+
+        return self.guard(policy)
+
     @contextmanager
     def raise_on_cancel(self) -> Generator[Fence]:
         """
@@ -134,7 +180,11 @@ class Fencing:
             yield fence
 
         if fence.cancelled:
-            raise FenceCancelled(fence.cancel_reasons, suppressed=fence.suppressed)
+            raise FenceCancelled(
+                fence.cancel_reasons,
+                suppressed=fence.suppressed,
+                declined_reasons=fence.declined_reasons,
+            )
 
     @contextmanager
     def move_on_cancel(self) -> Generator[Fence]:
@@ -171,7 +221,7 @@ class Fencing:
             triggers.append(TimeoutTrigger(delay=remaining, code=self._deadline_code))
 
         triggers.extend(EventTrigger(event=e.event, code=e.code) for e in self._events)
-        return Fence(*triggers)
+        return Fence(*triggers, policy=self._policy)
 
     def _derive(
         self,
@@ -179,14 +229,20 @@ class Fencing:
         _deadline: float | None = _UNSET,
         _deadline_code: str | None = _UNSET,
         _events: tuple[_EventEntry, ...] = _UNSET,
+        _policy: CancelPolicy | None = _UNSET,
         _anchored: bool = _UNSET,
     ) -> Fencing:
         return Fencing(
             _deadline=self._deadline if _deadline is _UNSET else _deadline,
             _deadline_code=self._deadline_code if _deadline_code is _UNSET else _deadline_code,
             _events=self._events if _events is _UNSET else _events,
+            _policy=self._policy if _policy is _UNSET else _policy,
             _anchored=self._anchored if _anchored is _UNSET else _anchored,
         )
+
+
+def _both(first: CancelPolicy, second: CancelPolicy) -> CancelPolicy:
+    return lambda reason: first(reason) and second(reason)
 
 
 def on_timeout(delay: float, *, code: str | None = None) -> Fencing:

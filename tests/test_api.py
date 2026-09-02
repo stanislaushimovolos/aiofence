@@ -11,6 +11,8 @@ from aiofence import (
     FenceCancelled,
     Fencing,
     TimeoutTrigger,
+    bind_fencing,
+    get_current_fencing,
     on_deadline,
     on_event,
     on_timeout,
@@ -494,3 +496,217 @@ async def test__move_on_cancel__when_no_running_task__then_raises_runtime_error(
     await asyncio.sleep(0)
 
     assert "needs a running asyncio task" in str(errors[0])
+
+
+# --- guard ---
+
+
+def test__guard__when_called__then_returns_new_instance() -> None:
+    base = Fencing()
+    derived = base.guard(lambda _: True)
+    assert derived is not base
+    assert base._policy is None
+
+
+async def test__guard__then_fence_carries_policy() -> None:
+    def policy(_: CancelReason) -> bool:
+        return True
+
+    with Fencing().guard(policy).move_on_cancel() as fence:
+        assert fence._policy is policy
+
+
+async def test__guard__when_declines__then_reason_declined() -> None:
+    with Fencing().timeout(0, code="to").guard(lambda _: False).move_on_cancel() as fence:
+        await asyncio.sleep(0)
+
+    assert not fence.cancelled
+    assert fence.declined_by("to")
+
+
+async def test__guard__when_two_guards__then_and() -> None:
+    fencing = Fencing().timeout(0, code="to").guard(lambda _: True).guard(lambda _: False)
+
+    with fencing.move_on_cancel() as fence:
+        await asyncio.sleep(0)
+
+    assert fence.declined_by("to")
+
+
+async def test__guard__when_first_declines__then_second_not_called() -> None:
+    second_called = False
+
+    def second(_: CancelReason) -> bool:
+        nonlocal second_called
+        second_called = True
+        return True
+
+    fencing = Fencing().timeout(0).guard(lambda _: False).guard(second)
+    with fencing.move_on_cancel():
+        await asyncio.sleep(0)
+
+    assert not second_called
+
+
+async def test__guard__when_bound_above__then_inherited_below() -> None:
+    fencing = Fencing().guard(lambda _: False)
+
+    with bind_fencing(fencing):
+        with get_current_fencing().timeout(0, code="to").move_on_cancel() as fence:
+            await asyncio.sleep(0)
+
+    assert fence.declined_by("to")
+
+
+async def test__guard__when_anchored__then_fresh_one_shot() -> None:
+    anchored = Fencing().timeout(100)
+    derived = anchored.guard(lambda _: True)
+
+    with anchored.move_on_cancel():
+        pass
+
+    with derived.move_on_cancel() as fence:
+        pass
+
+    assert not fence.cancelled
+
+
+# --- unless ---
+
+
+@pytest.fixture
+def state() -> dict[str, bool]:
+    return {"done": False}
+
+
+async def test__unless__when_precondition_false__then_cancels(state) -> None:
+    fencing = Fencing().timeout(0, code="to").unless(lambda: state["done"], code="to")
+
+    with fencing.move_on_cancel() as fence:
+        await asyncio.sleep(10)
+
+    assert fence.cancelled_by("to")
+    assert not fence.declined_by("to")
+
+
+async def test__unless__when_precondition_true__then_declined(state) -> None:
+    state["done"] = True
+    fencing = Fencing().timeout(0, code="to").unless(lambda: state["done"], code="to")
+
+    with fencing.move_on_cancel() as fence:
+        await asyncio.sleep(0)
+
+    assert fence.declined_by("to")
+    assert not fence.cancelled
+
+
+@pytest.mark.parametrize("precondition", [lambda: True, lambda: False])
+async def test__unless__with_code__when_other_code__then_untouched(precondition) -> None:
+    fencing = Fencing().timeout(0, code="to").unless(precondition, code="ev")
+
+    with fencing.move_on_cancel() as fence:
+        await asyncio.sleep(10)
+
+    assert fence.cancelled_by("to")
+    assert fence.declined_reasons == ()
+
+
+async def test__unless__with_code__when_reason_has_no_code__then_untouched() -> None:
+    with Fencing().timeout(0).unless(lambda: True, code="ev").move_on_cancel() as fence:
+        await asyncio.sleep(10)
+
+    assert fence.cancelled
+    assert fence.declined_reasons == ()
+
+
+async def test__unless__without_code__when_true__then_every_reason_declined() -> None:
+    ev = asyncio.Event()
+    ev.set()
+    fencing = Fencing().timeout(0, code="to").event(ev, code="ev").unless(lambda: True)
+
+    with fencing.move_on_cancel() as fence:
+        await asyncio.sleep(0)
+
+    assert not fence.cancelled
+    assert fence.declined_by("to")
+    assert fence.declined_by("ev")
+
+
+async def test__unless__without_code__when_false__then_cancels() -> None:
+    with Fencing().timeout(0, code="to").unless(lambda: False).move_on_cancel() as fence:
+        await asyncio.sleep(10)
+
+    assert fence.cancelled_by("to")
+
+
+async def test__unless__when_chained_over_two_codes__then_each_declined() -> None:
+    ev = asyncio.Event()
+    ev.set()
+    fencing = Fencing().timeout(0, code="to").event(ev, code="ev")
+    for code in ("to", "ev"):
+        fencing = fencing.unless(lambda: True, code=code)
+
+    with fencing.move_on_cancel() as fence:
+        await asyncio.sleep(0)
+
+    assert fence.declined_by("to")
+    assert fence.declined_by("ev")
+    assert not fence.cancelled
+
+
+async def test__unless__when_precondition_read_at_fire_time__then_late_flip_declines() -> None:
+    ev = asyncio.Event()
+    done = False
+    fencing = Fencing().event(ev, code="ev").unless(lambda: done, code="ev")
+
+    async def finish_then_disconnect() -> None:
+        nonlocal done
+        done = True
+        ev.set()
+
+    task = asyncio.create_task(finish_then_disconnect())
+    with fencing.move_on_cancel() as fence:
+        await asyncio.sleep(0.01)
+    await task
+
+    assert fence.declined_by("ev")
+    assert not fence.cancelled
+
+
+# --- raise_on_cancel + declined ---
+
+
+async def test__raise_on_cancel__when_everything_declined__then_no_raise() -> None:
+    with Fencing().timeout(0, code="to").guard(lambda _: False).raise_on_cancel() as fence:
+        await asyncio.sleep(0)
+
+    assert fence.declined_by("to")
+
+
+async def test__raise_on_cancel__when_delivered__then_exception_carries_declined() -> None:
+    ev = asyncio.Event()
+    ev.set()
+    fencing = Fencing().timeout(0, code="to").event(ev, code="ev").unless(lambda: True, code="ev")
+
+    with pytest.raises(FenceCancelled) as exc_info:
+        with fencing.raise_on_cancel():
+            await asyncio.sleep(10)
+
+    assert exc_info.value.cancelled_by("to")
+    assert exc_info.value.declined_by("ev")
+    assert len(exc_info.value.declined_reasons) == 1
+
+
+def test__fence_cancelled__when_no_declined__then_defaults_empty() -> None:
+    reason = CancelReason(message="timed out", cancel_type=CancelType.TIMEOUT, code="db")
+    exc = FenceCancelled((reason,), suppressed=True)
+    assert exc.declined_reasons == ()
+    assert not exc.declined_by("db")
+
+
+def test__fence_cancelled__declined_by__when_match__then_true() -> None:
+    reason = CancelReason(message="timed out", cancel_type=CancelType.TIMEOUT, code="db")
+    declined = CancelReason(message="event", cancel_type=CancelType.EVENT, code="ev")
+    exc = FenceCancelled((reason,), suppressed=True, declined_reasons=(declined,))
+    assert exc.declined_by("ev")
+    assert not exc.cancelled_by("ev")

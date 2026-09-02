@@ -115,6 +115,14 @@ elif fence.cancelled_by("budget"):
     return cached_result
 ```
 
+**Guarded cancellation** — a trigger firing is not always a reason to cancel. Decline a reason while a precondition holds, scoped to one code so the rest of the fence keeps working:
+
+```python
+with get_current_fencing().unless(generation.is_done, code="disconnect").move_on_cancel() as fence:
+    async for chunk in upstream:   # keeps draining after the finish reason
+        yield chunk
+```
+
 **Native asyncio** — works with asyncio's `cancel()`/`uncancel()` counter protocol. Compatible with `TaskGroup`, `asyncio.timeout()`. No new runtime, no dependencies.
 
 ## Client disconnects
