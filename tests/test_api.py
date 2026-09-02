@@ -73,6 +73,26 @@ async def test__timeout__with_code__then_code_preserved() -> None:
         assert trigger._code == "db"
 
 
+async def test__timeout__when_none__then_returns_same_instance_unanchored() -> None:
+    base = Fencing()
+    derived = base.timeout(None, code="db")
+    assert derived is base
+    assert derived._anchored is False
+
+
+async def test__timeout__when_none__then_fence_has_no_timeout_trigger() -> None:
+    event = asyncio.Event()
+    with Fencing().event(event).timeout(None).move_on_cancel() as fence:
+        assert [type(t) for t in fence._triggers] == [EventTrigger]
+
+
+async def test__timeout__when_none_after_deadline__then_deadline_kept() -> None:
+    loop = asyncio.get_running_loop()
+    derived = Fencing().deadline(loop.time() + 5, code="sla").timeout(None)
+    with derived.move_on_cancel() as fence:
+        assert fence._triggers[0]._code == "sla"
+
+
 # --- Deadline ---
 
 
@@ -441,6 +461,11 @@ async def test__on_timeout__then_equivalent_to_fencing_timeout() -> None:
 
     assert fence.suppressed
     assert fence.cancelled
+
+
+async def test__on_timeout__when_none__then_empty_fencing() -> None:
+    with on_timeout(None).move_on_cancel() as fence:
+        assert fence._triggers == ()
 
 
 async def test__on_timeout__with_code__then_code_preserved() -> None:

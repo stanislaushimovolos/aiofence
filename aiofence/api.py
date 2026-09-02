@@ -85,16 +85,21 @@ class Fencing:
         self._anchored = _anchored
         self._used = False
 
-    def timeout(self, delay: float, *, code: str | None = None) -> Fencing:
+    def timeout(self, delay: float | None, *, code: str | None = None) -> Fencing:
         """
         Add a relative timeout. Eagerly resolves to an absolute deadline.
         Makes the Fencing one-shot (raises on reuse).
 
         Args:
-            delay: Seconds until cancellation.
+            delay: Seconds until cancellation. ``None`` adds nothing and
+                   returns the builder unchanged, as ``asyncio.timeout(None)``
+                   does — for an optional timeout coming from configuration.
             code: Machine-readable identifier for programmatic matching
                   via ``fence.cancelled_by(code)``.
         """
+        if delay is None:
+            return self
+
         loop = asyncio.get_running_loop()
         when = loop.time() + delay
         if self._deadline is None or when <= self._deadline:
@@ -245,12 +250,12 @@ def _both(first: CancelPolicy, second: CancelPolicy) -> CancelPolicy:
     return lambda reason: first(reason) and second(reason)
 
 
-def on_timeout(delay: float, *, code: str | None = None) -> Fencing:
+def on_timeout(delay: float | None, *, code: str | None = None) -> Fencing:
     """
     Create a Fencing with a relative timeout (anchored, one-shot).
 
     Args:
-        delay: Seconds until cancellation.
+        delay: Seconds until cancellation. ``None`` yields an empty Fencing.
         code: Machine-readable identifier for programmatic matching
               via ``fence.cancelled_by(code)``.
     """
