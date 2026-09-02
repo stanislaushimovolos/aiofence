@@ -9,6 +9,8 @@ from enum import Enum, auto
 from typing import Any, Self
 from weakref import WeakKeyDictionary
 
+from .backends import CancelBackend, CancelHandle, NativeBackend
+
 
 class CancelType(Enum):
     EVENT = auto()
@@ -81,17 +83,26 @@ class Fence:
     `policy` is consulted once per reason before the cancel is delivered.
     A reason it rejects is recorded in `declined_reasons` and does not
     cancel; a policy that raises is logged and treated as accepting.
+
+    `backend` decides how the cancel reaches the task. Defaults to
+    `NativeBackend` — asyncio's own `cancel()`/`uncancel()` protocol.
     """
 
-    def __init__(self, *triggers: Trigger, policy: CancelPolicy | None = None) -> None:
+    def __init__(
+        self,
+        *triggers: Trigger,
+        policy: CancelPolicy | None = None,
+        backend: CancelBackend | None = None,
+    ) -> None:
         self._triggers = triggers
         self._policy = policy
+        self._backend = backend if backend is not None else NativeBackend()
         self._current_task: asyncio.Task[Any] | None = None
         self._exit_handlers: list[TriggerHandle] = []
         self._cancel_reasons: list[CancelReason] = []
         self._declined_reasons: list[CancelReason] = []
-        self._cancel_token: _CancelToken | None = None
-        self._cancelling: int | None = None
+        self._handle: CancelHandle | None = None
+        self._cancel_sent = False
         self._armed = False
         self._exited = False
         self._suppressed = False
@@ -150,7 +161,7 @@ class Fence:
 
         _active_fences[task] = self
         self._current_task = task
-        self._cancelling = task.cancelling()
+        self._handle = self._backend.enter(task)
 
         for source in self._triggers:
             reason = source.check()
@@ -158,11 +169,7 @@ class Fence:
                 self._admit(reason)
 
         if self._cancel_reasons:
-            # 3.12: uncancel() doesn't clear _must_cancel, so calling
-            # task.cancel() synchronously here would cause a spurious
-            # CancelledError at the next await. Defer via call_soon so
-            # cancel() finds _fut_waiter set and never touches _must_cancel.
-            self._schedule_cancel()
+            self._cancel()
             return self
 
         self._exit_handlers = [source.arm(self._on_trigger) for source in self._triggers]
@@ -181,10 +188,10 @@ class Fence:
                 guard.disarm()
 
         try:
-            if self._cancel_token is None:
+            if self._handle is None:
                 return False
 
-            self._suppressed = self._cancel_token.resolve(exc_type)
+            self._suppressed = self._handle.exit(exc_type, exc_val)
             return self._suppressed
         finally:
             if self._current_task is not None:
@@ -192,10 +199,16 @@ class Fence:
 
             # remove references to allow GC collect objects
             self._current_task = None
-            self._cancel_token = None
+            self._handle = None
             self._exit_handlers = []
 
     def _on_trigger(self, reason: CancelReason) -> None:
+        if asyncio.current_task() is self._current_task:
+            raise asyncio.InvalidStateError(
+                "Trigger callback fired synchronously inside the task. "
+                "Trigger.arm() callbacks must fire from the event loop, not inline."
+            )
+
         if self._admit(reason):
             self._cancel()
 
@@ -223,103 +236,14 @@ class Fence:
 
     def _cancel(self) -> None:
         """
-        Cancels task immediately. Must only be called from event loop
-        callbacks (outside the task), where _fut_waiter is set and
-        task.cancel() won't touch _must_cancel.
+        Deliver the first accepted reason through the backend, once.
+        Later accepted reasons are recorded only.
         """
-        if self._cancel_token is not None:
-            return
-
-        if asyncio.current_task() is self._current_task:
-            raise asyncio.InvalidStateError(
-                "Trigger callback fired synchronously inside the task. "
-                "Trigger.arm() callbacks must fire from the event loop, not inline."
-            )
-
-        task, cancelling = self._cancel_preconditions()
-        self._cancel_token = _CancelToken.cancel(task, self._cancel_reasons[0].message, cancelling)
-
-    def _schedule_cancel(self) -> None:
-        """
-        Defers task.cancel() via call_soon. Used from __enter__ (pre-trigger
-        path) to avoid setting _must_cancel during synchronous execution.
-        """
-        task, cancelling = self._cancel_preconditions()
-        self._cancel_token = _CancelToken.schedule_cancel(
-            task, self._cancel_reasons[0].message, cancelling
-        )
-
-    def _cancel_preconditions(self) -> tuple[asyncio.Task[Any], int]:
-        if self._current_task is None or self._cancelling is None:
+        if self._handle is None:
             raise RuntimeError("Fence._cancel() called before __enter__")
 
-        return self._current_task, self._cancelling
+        if self._cancel_sent:
+            return
 
-
-class _CancelToken:
-    """
-    Encapsulates one cancel/uncancel cycle using asyncio's counter protocol.
-
-    Defers `task.cancel()` via `call_soon` to avoid setting `_must_cancel`
-    when called from within the task's own synchronous execution.
-    """
-
-    def __init__(
-        self,
-        task: asyncio.Task[Any],
-        cancelling: int,
-    ) -> None:
-        self._task = task
-        self._cancelling = cancelling
-        self._delivered = False
-        self._handle: asyncio.Handle | None = None
-
-    @classmethod
-    def schedule_cancel(
-        cls,
-        task: asyncio.Task[Any],
-        msg: str,
-        cancelling: int,
-    ) -> _CancelToken:
-        token = cls(task, cancelling)
-        token._handle = asyncio.get_running_loop().call_soon(token._deliver_cancellation, msg)
-        return token
-
-    @classmethod
-    def cancel(
-        cls,
-        task: asyncio.Task[Any],
-        msg: str,
-        cancelling: int,
-    ) -> _CancelToken:
-        token = cls(task, cancelling)
-        token._deliver_cancellation(msg)
-        return token
-
-    def resolve(self, exc_type: type[BaseException] | None) -> bool:
-        """
-        Balance the cancel counter and decide whether to suppress.
-
-        Returns True to suppress the exception (CancelledError is ours),
-        False to let it propagate.
-        """
-
-        # body completed before cancel was delivered — rescind
-        if not self._delivered:
-            if self._handle is not None:
-                self._handle.cancel()
-                self._handle = None
-            return False  # nothing to suppress
-
-        remaining = self._task.uncancel()
-        # suppress our CancelledError, propagate everything else
-        return (
-            remaining <= self._cancelling
-            and exc_type is not None
-            and issubclass(exc_type, asyncio.CancelledError)
-        )
-
-    def _deliver_cancellation(self, msg: str) -> None:
-        self._delivered = True
-        self._handle = None
-        self._task.cancel(msg=msg)
+        self._cancel_sent = True
+        self._handle.cancel(self._cancel_reasons[0].message)

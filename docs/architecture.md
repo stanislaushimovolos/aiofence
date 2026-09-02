@@ -2,7 +2,8 @@
 
 ## Module Layout
 
-- **`core.py`** — abstractions and core runtime: `CancelReason`, `CancelType`, `CancelPolicy`, `Trigger`, `TriggerHandle`, `Fence`, `_CancelToken`
+- **`core.py`** — abstractions and core runtime: `CancelReason`, `CancelType`, `CancelPolicy`, `Trigger`, `TriggerHandle`, `Fence`
+- **`backends/`** — how a fence cancels its task, behind the `CancelBackend` / `CancelHandle` protocols. `NativeBackend` (default) is asyncio's own `cancel()`/`uncancel()` protocol. `Fence(backend=...)` selects one; triggers, policy and reasons are unaffected by the choice
 - **`triggers/`** — built-in trigger implementations: `TimeoutTrigger`/`TimeoutHandle`, `EventTrigger`/`EventHandle`
 - **`contrib/`** — optional framework integrations (Starlette / FastAPI). Never imported by the core package, so it stays dependency-free; see [api.md](api.md)
   - **`contrib/starlette/`** — the ASGI side, split by direction: one module writes, the other reads. Import from the package; the split is internal
@@ -20,18 +21,18 @@ For usage guide, examples, and custom trigger documentation see [api.md](api.md)
 - **`Trigger`** — abstract cancellation condition. `check()` for synchronous pre-check, `arm(callback)` for async monitoring. Returns a `TriggerHandle`.
 - **`TriggerHandle`** — live watch returned by `Trigger.arm()`. `disarm()` stops monitoring.
 - **`Fence`** — sync context manager that arms triggers against the current task. Suppresses `CancelledError` on exit. Caller inspects `fence.suppressed` / `fence.cancel_reasons` after the block.
-- **`_CancelToken`** — internal. Encapsulates one `cancel()`/`uncancel()` cycle. Tracks whether the deferred cancel fired and settles ownership in `__exit__`.
+- **`CancelBackend`** — `enter(task)` returns a `CancelHandle`: `cancel(message)` delivers the fence's one cancel, `exit(exc_type, exc_val)` balances it and says whether the exception leaving the body is the fence's to suppress. `exit` is always called, cancel or not. `NativeBackend`'s handle encapsulates one `cancel()`/`uncancel()` cycle, tracks whether a deferred cancel fired and settles ownership by the counter.
 - **`CancelReason`** — frozen dataclass with `message` and `cancel_type` (TIMEOUT or EVENT).
 - **`CancelPolicy`** — `Callable[[CancelReason], bool]` consulted once per reason before the cancel is delivered. `False` routes the reason to `fence.declined_reasons` and cancels nothing; a raise is logged and counts as `True`. `Fencing.guard()` composes them with AND, `Fencing.unless()` is sugar over `guard()`.
 
 ## Cancellation Flow
 
 0. `Fence.__enter__` requires a running task — `task.cancel()` is the only mechanism there is. Entered from a loop callback or from a worker thread (a sync FastAPI `def` handler), it raises `RuntimeError`
-1. `Fence.__enter__` snapshots `task.cancelling()` as the baseline counter
-2. Runs `check()` on all triggers — each reason passes the policy first; if any is accepted, records it and schedules `task.cancel()` via `call_soon`
-3. If no accepted pre-triggers, arms all triggers (an already-set event arms as a no-op); when one fires, the callback passes the reason through the policy, records it and calls `task.cancel()`
+1. `Fence.__enter__` calls `backend.enter(task)`; the native handle snapshots `task.cancelling()` as the baseline counter
+2. Runs `check()` on all triggers — each reason passes the policy first; if any is accepted, records it and calls `handle.cancel()`. Called from inside the task, the native handle defers `task.cancel()` via `call_soon`
+3. If no accepted pre-triggers, arms all triggers (an already-set event arms as a no-op); when one fires, the callback passes the reason through the policy, records it and calls `handle.cancel()`, which from a loop callback is an immediate `task.cancel()`
 4. Body runs. At the next `await`, `CancelledError` is raised inside the body
-5. `Fence.__exit__` disarms all triggers, then calls `_CancelToken.resolve()`:
+5. `Fence.__exit__` disarms all triggers, then calls `handle.exit()`; for the native handle:
    - If cancel never fired (sync body completed first) — rescinds pending `call_soon`, returns `False`
    - If cancel fired and counter returned to baseline — `uncancel()` + suppress (`return True`)
    - If counter above baseline — outer scope also cancelled, don't suppress (`return False`)
@@ -82,12 +83,12 @@ Instead, pre-triggered Fences schedule `task.cancel()` via `call_soon` and let t
 ### TaskGroup compatibility
 
 - **Fence inside TaskGroup**: suppresses, counter balanced, TaskGroup never sees `CancelledError`
-- **TaskGroup cancels while Fence is active**: Fence's trigger didn't fire (`_cancel_token is None`), so `__exit__` returns `False` — `CancelledError` propagates to TaskGroup correctly
+- **TaskGroup cancels while Fence is active**: Fence's trigger didn't fire (no cancel was delivered), so `handle.exit()` returns `False` — `CancelledError` propagates to TaskGroup correctly
 - **Both fire simultaneously**: counter protocol resolves ownership — Fence sees `remaining > baseline`, backs off, TaskGroup claims it
 
 ## Deferred Cancel via `call_soon`
 
-`_CancelToken` never calls `task.cancel()` synchronously from within the task's own execution. Instead it schedules via `loop.call_soon()`. This avoids setting asyncio's internal `_must_cancel` flag during synchronous code, which would force `CancelledError` at the next `await` regardless of whether `uncancel()` was called.
+`NativeBackend`'s handle never calls `task.cancel()` synchronously from within the task's own execution. Instead it schedules via `loop.call_soon()`. This avoids setting asyncio's internal `_must_cancel` flag during synchronous code, which would force `CancelledError` at the next `await` regardless of whether `uncancel()` was called.
 
 ## Event Watching Without Tasks
 
@@ -132,7 +133,7 @@ Every piece exists because asyncio's counter protocol demands it:
 
 - **Counter snapshot** — needed to distinguish own cancel from outer cancel. `asyncio.timeout()` does the same.
 - **`call_soon` deferral** — calling `cancel()` synchronously sets `_must_cancel`, which `uncancel()` couldn't clear until 3.13. Deferring via `call_soon` ensures `cancel()` finds `_fut_waiter` set and never touches the flag.
-- **`_CancelToken`** — tracks "scheduled but not delivered" vs "delivered". Without this, a sync body completing before `call_soon` fires would leave a stale cancel in flight.
+- **The native handle** — tracks "scheduled but not delivered" vs "delivered". Without this, a sync body completing before `call_soon` fires would leave a stale cancel in flight.
 - **Suppression** — the only correct exit strategy. The alternatives all cause the worker to lose control (post-block code never runs), and option 3 additionally breaks `asyncio.timeout` via counter inflation.
 
 There is no simpler way to implement this within asyncio's cancellation model. Cooperative flags (check-in-a-loop) would work but lose the ability to interrupt arbitrary `await` points. Not calling `task.cancel()` means not solving the problem.

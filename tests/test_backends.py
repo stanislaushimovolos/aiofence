@@ -1,0 +1,168 @@
+import asyncio
+from typing import Any
+
+import pytest
+
+from aiofence import EventTrigger, Fence, TimeoutTrigger
+from aiofence.backends import CancelHandle, NativeBackend
+
+
+class RecordingBackend:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, Any]] = []
+        self._inner = NativeBackend()
+
+    def enter(self, task: asyncio.Task[Any]) -> CancelHandle:
+        self.calls.append(("enter", task))
+        return RecordingHandle(self._inner.enter(task), self.calls)
+
+
+class RecordingHandle:
+    def __init__(self, inner: CancelHandle, calls: list[tuple[str, Any]]) -> None:
+        self._inner = inner
+        self._calls = calls
+
+    def cancel(self, message: str) -> None:
+        self._calls.append(("cancel", message))
+        self._inner.cancel(message)
+
+    def exit(self, exc_type: type[BaseException] | None, exc_val: BaseException | None) -> bool:
+        result = self._inner.exit(exc_type, exc_val)
+        self._calls.append(("exit", result))
+        return result
+
+
+class SuppressingHandle:
+    def cancel(self, message: str) -> None:
+        pass
+
+    def exit(self, *_args: object) -> bool:
+        return True
+
+
+class SuppressingBackend:
+    def enter(self, *_args: object) -> CancelHandle:
+        return SuppressingHandle()
+
+
+@pytest.fixture
+def backend() -> RecordingBackend:
+    return RecordingBackend()
+
+
+@pytest.fixture
+def set_event() -> asyncio.Event:
+    event = asyncio.Event()
+    event.set()
+    return event
+
+
+async def test__fence__when_entered__then_backend_enters_current_task(backend):
+    with Fence(backend=backend):
+        pass
+
+    assert backend.calls[0] == ("enter", asyncio.current_task())
+
+
+async def test__fence__when_nothing_fires__then_handle_exit_still_called(backend):
+    with Fence(backend=backend) as fence:
+        await asyncio.sleep(0)
+
+    assert backend.calls[-1] == ("exit", False)
+    assert not fence.suppressed
+
+
+async def test__fence__when_trigger_fires__then_cancels_through_handle_with_reason(backend):
+    with Fence(TimeoutTrigger(0.01), backend=backend) as fence:
+        await asyncio.sleep(10)
+
+    assert ("cancel", "timed out after 0.01s") in backend.calls
+    assert backend.calls[-1] == ("exit", True)
+    assert fence.suppressed
+
+
+async def test__fence__when_pre_triggered__then_cancels_through_handle_from_enter(
+    backend, set_event
+):
+    with Fence(EventTrigger(set_event), backend=backend) as fence:
+        assert backend.calls[-1][0] == "cancel"
+        await asyncio.sleep(10)
+
+    assert fence.suppressed
+
+
+async def test__fence__when_two_triggers_fire__then_handle_cancelled_once(backend):
+    event1 = asyncio.Event()
+    event2 = asyncio.Event()
+
+    with Fence(EventTrigger(event1), EventTrigger(event2), backend=backend) as fence:
+        event1.set()
+        event2.set()
+        await asyncio.sleep(1)
+
+    cancels = [c for c in backend.calls if c[0] == "cancel"]
+    assert len(cancels) == 1
+    assert len(fence.cancel_reasons) == 2
+
+
+async def test__fence__when_declined__then_handle_never_cancelled(backend, set_event):
+    with Fence(EventTrigger(set_event), policy=lambda _: False, backend=backend) as fence:
+        await asyncio.sleep(0)
+
+    assert [c[0] for c in backend.calls] == ["enter", "exit"]
+    assert not fence.cancelled
+
+
+async def test__fence__suppressed__then_reflects_handle_exit_result():
+    with Fence(backend=SuppressingBackend()) as fence:
+        raise asyncio.CancelledError
+
+    assert fence.suppressed
+
+
+async def test__fence__when_no_backend_given__then_native_is_used():
+    fence = Fence()
+
+    assert isinstance(fence._backend, NativeBackend)
+
+
+async def test__native_handle__when_cancelled_from_inside_task__then_delivered_at_next_await():
+    task = asyncio.current_task()
+    assert task is not None
+    handle = NativeBackend().enter(task)
+
+    handle.cancel("from inside")
+    with pytest.raises(asyncio.CancelledError, match="from inside"):
+        await asyncio.sleep(10)
+
+    assert handle.exit(asyncio.CancelledError, asyncio.CancelledError("from inside"))
+    assert task.cancelling() == 0
+
+
+async def test__native_handle__when_body_finishes_before_delivery__then_cancel_rescinded():
+    task = asyncio.current_task()
+    assert task is not None
+    handle = NativeBackend().enter(task)
+
+    handle.cancel("too late")
+    suppressed = handle.exit(None, None)
+    await asyncio.sleep(0)
+
+    assert not suppressed
+    assert task.cancelling() == 0
+
+
+async def test__native_handle__when_outer_cancel_also_pending__then_does_not_suppress():
+    task = asyncio.current_task()
+    assert task is not None
+    handle = NativeBackend().enter(task)
+    loop = asyncio.get_running_loop()
+
+    loop.call_soon(handle.cancel, "mine")
+    loop.call_soon(task.cancel, "outer")
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.sleep(10)
+    suppressed = handle.exit(asyncio.CancelledError, asyncio.CancelledError())
+
+    assert not suppressed
+    assert task.uncancel() == 0
