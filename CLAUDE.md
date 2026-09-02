@@ -25,9 +25,13 @@ with Fence(TimeoutTrigger(30), EventTrigger(shutdown, code="shutdown")) as fence
 if fence.cancelled:
     print(fence.cancel_reasons)       # (CancelReason(message='timed out after 30s', ...),)
     print(fence.cancelled_by("shutdown"))  # True / False
+
+# decline a reason while a precondition holds; other codes still cancel
+with get_current_fencing().unless(generation.is_done, code="disconnect").move_on_cancel() as fence:
+    ...
 ```
 
-Core types: `Fence`, `Trigger`, `TriggerHandle`, `CancelReason`, `CancelType`. Built-in triggers: `TimeoutTrigger`, `EventTrigger`.
+Core types: `Fence`, `Trigger`, `TriggerHandle`, `CancelReason`, `CancelType`, `CancelPolicy`. Built-in triggers: `TimeoutTrigger`, `EventTrigger`.
 
 ## Workflow
 

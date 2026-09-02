@@ -9,6 +9,7 @@ from .api import (
     on_timeout,
 )
 from .core import (
+    CancelPolicy,
     CancelReason,
     CancelType,
     Fence,
@@ -23,6 +24,7 @@ from .triggers import (
 )
 
 __all__ = [
+    "CancelPolicy",
     "CancelReason",
     "CancelType",
     "EventHandle",

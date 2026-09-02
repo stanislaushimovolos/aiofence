@@ -61,6 +61,8 @@ Available builder methods:
 | `.timeout(delay, *, code=None)` | Add a relative timeout |
 | `.deadline(when, *, code=None)` | Add an absolute deadline (`loop.time()` based) |
 | `.event(event, *, code=None)` | Add an event condition |
+| `.guard(policy)` | Consult `policy(reason)` before delivering a cancel |
+| `.unless(precondition, *, code=None)` | Decline cancellation while `precondition()` holds |
 
 ### Timeout / Deadline Merging
 
@@ -77,6 +79,43 @@ ctx = on_deadline(T + 20, code="sla").timeout(5, code="db")
 `.timeout()` eagerly resolves to an absolute deadline, making the `Fencing` **one-shot** (raises on reuse). Use `.deadline()` for reusable configs.
 
 Events are never merged — all arm independently. Registrations are deduplicated on the `(event, code)` pair, so the same event under two different codes gives you two triggers and `cancelled_by()` answers `True` for both. The same event under the same code collapses to one.
+
+### Guarding cancellation
+
+A trigger firing is not always a reason to cancel. A streaming proxy wants the client's disconnect to cancel the upstream read while the answer is still being generated, but once the finish reason has arrived it wants to keep draining — the trailing usage frame is what gets billed. Same trigger, different decision, depending on state only the fence's user knows at fire time.
+
+`.unless()` declines reasons while a precondition holds. Scope it to one code so the rest of the fence — typically the timeout — keeps cancelling:
+
+```python
+fencing = get_current_fencing().unless(generation.is_done, code=DISCONNECT_CODE)
+with fencing.move_on_cancel() as fence:
+    async for chunk in upstream:
+        generation.observe(chunk)      # flips is_done() on the finish reason
+        yield chunk
+
+if fence.cancelled_by(DISCONNECT_CODE):
+    ...  # client left before the finish reason; the upstream read was cancelled
+elif fence.declined_by(DISCONNECT_CODE):
+    ...  # client left after it; the drain ran to the end
+```
+
+Without a `code`, the precondition covers every reason on the fence, timeouts included — a fence whose timeout was declined has no time bound left. A rule that spans codes uses `.guard()` directly; it receives the `CancelReason` and returns `True` to deliver the cancel:
+
+```python
+def policy(reason: CancelReason) -> bool:
+    return reason.cancel_type is CancelType.TIMEOUT or not generation.is_done()
+
+with get_current_fencing().guard(policy).move_on_cancel() as fence:
+    ...
+```
+
+Semantics:
+
+- **Consulted once per reason**, at the moment it is produced — the pre-check on entry or the live trigger callback. A declined fire is consumed, not re-evaluated: a trigger fires once per arming, so "decline now, cancel later" is the caller's job, read `declined_by()` after the block.
+- **A declined pre-check still arms** the other triggers, so a live timeout keeps working when a pre-set event is declined.
+- **Guards compose with AND** and short-circuit. A guard added to a builder that already has one can only decline more, never less.
+- **Inherited by derivation**, like events and deadlines. A guard bound on the ambient fencing applies to every fence built below it, and there is no way to remove one — fence on a fresh `Fencing()` to escape it.
+- **Runs inside the loop callback**, so it must be sync and cheap. A policy that raises is logged under the `aiofence` logger and treated as `True` — cancelling is the safe default.
 
 ## Entering the Fence
 
@@ -117,8 +156,12 @@ After the block, the `Fence` has:
 | `fence.suppressed` | `bool` | `True` if `CancelledError` was caught and suppressed |
 | `fence.cancel_reasons` | `tuple[CancelReason, ...]` | All reasons that fired |
 | `fence.cancelled_by(code)` | `bool` | Did a specific trigger fire? |
+| `fence.declined_reasons` | `tuple[CancelReason, ...]` | Reasons a `guard` / `unless` policy rejected; they never cancelled |
+| `fence.declined_by(code)` | `bool` | Was a specific trigger declined? |
 
 Most code should use `cancelled` — it tells you whether a condition was met. `suppressed` differs only when a trigger fires but the body completes synchronously before `CancelledError` is delivered (pre-triggered sync body). In that case `cancelled` is `True` but `suppressed` is `False`.
+
+`declined_reasons` is a third bucket, not a variant of either: a declined reason never counts as `cancelled`. `FenceCancelled` carries `declined_reasons` / `declined_by()` alongside `cancel_reasons`, since it does not hold the fence.
 
 Each `CancelReason` has:
 
@@ -234,6 +277,8 @@ with Fence(TimeoutTrigger(5), EventTrigger(shutdown, code="shutdown")) as fence:
 ```
 
 `Fence` always suppresses `CancelledError`. It doesn't raise `FenceCancelled` — for that, use `Fencing.raise_on_cancel()`.
+
+`Fence(*triggers, policy=None)` takes the same `CancelPolicy` that `Fencing.guard()` builds; `unless()` is builder-only sugar over it.
 
 ## Starlette / FastAPI Integration
 
