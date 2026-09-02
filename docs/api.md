@@ -34,7 +34,7 @@ Use the factory functions — each returns a `Fencing` builder:
 
 | Factory | Condition |
 |---------|-----------|
-| `on_timeout(delay, *, code=None)` | Relative timeout in seconds |
+| `on_timeout(delay, *, code=None)` | Relative timeout in seconds; `None` yields an empty Fencing |
 | `on_deadline(when, *, code=None)` | Absolute monotonic time (`loop.time()` based) |
 | `on_event(event, *, code=None)` | Cancel when `asyncio.Event` is set |
 
@@ -58,7 +58,7 @@ Available builder methods:
 
 | Method | Description |
 |--------|-------------|
-| `.timeout(delay, *, code=None)` | Add a relative timeout |
+| `.timeout(delay, *, code=None)` | Add a relative timeout; `None` adds nothing (optional timeout from config) |
 | `.deadline(when, *, code=None)` | Add an absolute deadline (`loop.time()` based) |
 | `.event(event, *, code=None)` | Add an event condition |
 | `.guard(policy)` | Consult `policy(reason)` before delivering a cancel |
