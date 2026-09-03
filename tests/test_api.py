@@ -247,15 +247,16 @@ async def test__event__when_pre_set_and_two_codes__then_both_codes_reported() ->
 # --- Anchored reuse ---
 
 
-async def test__anchored__when_entered_twice__then_raises() -> None:
+async def test__anchored__when_entered_twice__then_works() -> None:
     ctx = Fencing().timeout(100)
 
-    with ctx.move_on_cancel():
+    with ctx.move_on_cancel() as f1:
         pass
 
-    with pytest.raises(RuntimeError, match="already been used"):
-        with ctx.move_on_cancel():
-            pass
+    with ctx.move_on_cancel() as f2:
+        pass
+
+    assert f1 is not f2
 
 
 async def test__not_anchored__when_entered_twice__then_works() -> None:
@@ -583,7 +584,7 @@ async def test__guard__when_bound_above__then_inherited_below() -> None:
     assert fence.declined_by("to")
 
 
-async def test__guard__when_anchored__then_fresh_one_shot() -> None:
+async def test__guard__when_anchored__then_derived_stays_usable() -> None:
     anchored = Fencing().timeout(100)
     derived = anchored.guard(lambda _: True)
 

@@ -94,8 +94,8 @@ with fencing.timeout(5, code="db").move_on_cancel() as fence:
 **Context propagation** — store a `Fencing` in a `ContextVar` at the boundary, read it anywhere with `get_current_fencing()`. No need to pass configs through every call signature:
 
 ```python
-# HTTP handler boundary
-with bind_fencing(on_event(disconnect, code="disconnect").timeout(30)):
+# HTTP handler boundary — a shared budget is a deadline
+with bind_fencing(on_event(disconnect, code="disconnect").deadline(loop.time() + 30)):
     await handle_request()
 
 # deep inside, no arguments needed
@@ -185,7 +185,7 @@ An ASGI receive channel has exactly one useful reader — `receive()` is a queue
 
 - **One reader, above everything else.** On hypercorn, daphne and granian `http.disconnect` is delivered exactly once, so whoever reads it first consumes it and every other listener starves. A dependency cannot arbitrate — Starlette captures the raw `receive` before any dependency runs, so there is no reference left to wrap. Only a middleware sits above all of them.
 
-- **Replay, don't discard.** The usual watcher loop drops everything that isn't a disconnect, which steals body chunks: the loser of that race gets `{"body": b"", "more_body": False}`, and Starlette accepts it as a *complete, empty* body. Silent truncation, no exception, no log. `DisconnectMiddleware` forwards every message downstream in order and unchanged.
+- **Replay, don't discard.** The usual watcher loop drops everything that isn't a disconnect, which steals body chunks: the loser of that race gets `{"body": b"", "more_body": False}`, and Starlette accepts it as a *complete, empty* body. Silent truncation, no exception, no log. `DisconnectMiddleware` forwards every message downstream in order and unchanged. It does not make `Request.is_disconnected()` safe, though: that method pops and discards the next message whatever it is, body chunks included, so use the published event instead of polling it.
 
 - **"Stream ended" is not "client left".** Per the ASGI spec `http.disconnect` means the stream ended, and every server sends it once the response is complete. A watcher that can't tell the two apart fires on every successful request — and takes `BackgroundTasks` down with it. The middleware tracks response completion in a wrapped `send`, so only a disconnect arriving *before* the response finished sets the event.
 

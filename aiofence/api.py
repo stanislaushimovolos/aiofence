@@ -64,10 +64,10 @@ class Fencing:
     and materializes them into a Fence.
 
     Calling ``.timeout()`` anchors the builder to a point in time,
-    making it one-shot (raises on reuse).
+    making it per-operation: ``bind_fencing()`` refuses it.
     """
 
-    __slots__ = ("_anchored", "_deadline", "_deadline_code", "_events", "_policy", "_used")
+    __slots__ = ("_anchored", "_deadline", "_deadline_code", "_events", "_policy")
 
     def __init__(
         self,
@@ -83,12 +83,12 @@ class Fencing:
         self._deadline_code = _deadline_code
         self._policy = _policy
         self._anchored = _anchored
-        self._used = False
 
     def timeout(self, delay: float | None, *, code: str | None = None) -> Fencing:
         """
         Add a relative timeout. Eagerly resolves to an absolute deadline.
-        Makes the Fencing one-shot (raises on reuse).
+        Anchors the Fencing to this moment, so ``bind_fencing()`` refuses it;
+        use ``.deadline()`` for a budget shared through the context.
 
         Args:
             delay: Seconds until cancellation. ``None`` adds nothing and
@@ -211,14 +211,6 @@ class Fencing:
             yield fence
 
     def _build_fence(self) -> Fence:
-        if self._anchored:
-            if self._used:
-                raise RuntimeError(
-                    "This Fencing has already been used. "
-                    "Call .timeout() on the original Fencing to create a fresh anchor."
-                )
-            self._used = True
-
         triggers: list[Trigger] = []
         if self._deadline is not None:
             loop = asyncio.get_running_loop()
@@ -252,7 +244,7 @@ def _both(first: CancelPolicy, second: CancelPolicy) -> CancelPolicy:
 
 def on_timeout(delay: float | None, *, code: str | None = None) -> Fencing:
     """
-    Create a Fencing with a relative timeout (anchored, one-shot).
+    Create a Fencing with a relative timeout (anchored, per-operation).
 
     Args:
         delay: Seconds until cancellation. ``None`` yields an empty Fencing.
@@ -299,7 +291,15 @@ def bind_fencing(fencing: Fencing) -> Generator[None, None, None]:
     """
     Set the given Fencing as current for this context.
     Inner code can read it with ``get_current_fencing()``.
+
+    Raises ``RuntimeError`` for a Fencing anchored by ``.timeout()``:
+    a relative timeout is per-operation, a shared budget is ``.deadline()``.
     """
+    if fencing._anchored:
+        raise RuntimeError(
+            "A Fencing built with .timeout() is per-operation and cannot be bound "
+            "as context. Use .deadline(loop.time() + delay) for a shared budget."
+        )
     token = _current_fencing.set(fencing)
     try:
         yield
