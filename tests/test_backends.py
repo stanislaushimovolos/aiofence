@@ -4,10 +4,10 @@ from typing import Any
 import pytest
 
 from aiofence import EventTrigger, Fence, TimeoutTrigger
-from aiofence.backends import CancelHandle, NativeBackend
+from aiofence.backends import CancelBackend, CancelHandle, NativeBackend, get_default_backend
 
 
-class RecordingBackend:
+class RecordingBackend(CancelBackend):
     def __init__(self) -> None:
         self.calls: list[tuple[str, Any]] = []
         self._inner = NativeBackend()
@@ -17,7 +17,7 @@ class RecordingBackend:
         return RecordingHandle(self._inner.enter(task), self.calls)
 
 
-class RecordingHandle:
+class RecordingHandle(CancelHandle):
     def __init__(self, inner: CancelHandle, calls: list[tuple[str, Any]]) -> None:
         self._inner = inner
         self._calls = calls
@@ -32,7 +32,7 @@ class RecordingHandle:
         return result
 
 
-class SuppressingHandle:
+class SuppressingHandle(CancelHandle):
     def cancel(self, message: str) -> None:
         pass
 
@@ -40,7 +40,7 @@ class SuppressingHandle:
         return True
 
 
-class SuppressingBackend:
+class SuppressingBackend(CancelBackend):
     def enter(self, *_args: object) -> CancelHandle:
         return SuppressingHandle()
 
@@ -120,10 +120,10 @@ async def test__fence__suppressed__then_reflects_handle_exit_result():
     assert fence.suppressed
 
 
-async def test__fence__when_no_backend_given__then_native_is_used():
+async def test__fence__when_no_backend_given__then_default_backend_is_used():
     fence = Fence()
 
-    assert isinstance(fence._backend, NativeBackend)
+    assert fence._backend is get_default_backend()
 
 
 async def test__native_handle__when_cancelled_from_inside_task__then_delivered_at_next_await():

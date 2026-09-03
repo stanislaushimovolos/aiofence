@@ -245,6 +245,7 @@ async def test__fastapi_handler__when_request_is_the_only_param__then_body_read_
 # --- fenced body reads ---
 
 
+@pytest.mark.backend("native")  # anyio never cancels a task whose waiter is already done
 async def test__fenced_body_read__when_client_leaves_while_parked__then_fence_suppresses() -> None:
     """
     The channel sets the event before waking the parked reader, so the fence's

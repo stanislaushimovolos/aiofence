@@ -3,10 +3,10 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from .base import CancelHandle
+from .abc import CancelBackend, CancelHandle
 
 
-class NativeBackend:
+class NativeBackend(CancelBackend):
     """
     Cancels through asyncio's own protocol: one `task.cancel()`, balanced
     by one `uncancel()` on exit, with ownership settled by the
@@ -17,7 +17,7 @@ class NativeBackend:
         return _NativeHandle(task, task.cancelling())
 
 
-class _NativeHandle:
+class _NativeHandle(CancelHandle):
     def __init__(self, task: asyncio.Task[Any], cancelling: int) -> None:
         self._task = task
         self._cancelling = cancelling

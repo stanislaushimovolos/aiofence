@@ -109,6 +109,7 @@ async def test__sse_response__when_unfenced_generator__then_aborted_on_disconnec
     assert b"data: second" not in server.response_body
 
 
+@pytest.mark.backend("native")  # anyio defers to the listener's cancelled task group
 async def test__sse_response__when_fenced_generator__then_resumes_for_its_last_chunk() -> None:
     """
     ``move_on_cancel`` hands control back, so the generator emits its final

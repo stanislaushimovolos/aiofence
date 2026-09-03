@@ -9,7 +9,7 @@ from enum import Enum, auto
 from typing import Any, Self
 from weakref import WeakKeyDictionary
 
-from .backends import CancelBackend, CancelHandle, NativeBackend
+from .backends import CancelBackend, CancelHandle, get_default_backend
 
 
 class CancelType(Enum):
@@ -84,7 +84,8 @@ class Fence:
     A reason it rejects is recorded in `declined_reasons` and does not
     cancel; a policy that raises is logged and treated as accepting.
 
-    `backend` decides how the cancel reaches the task. Defaults to
+    `backend` decides how the cancel reaches the task. Defaults to the
+    process-wide default (`aiofence.set_default_backend`), which is
     `NativeBackend` — asyncio's own `cancel()`/`uncancel()` protocol.
     """
 
@@ -96,7 +97,7 @@ class Fence:
     ) -> None:
         self._triggers = triggers
         self._policy = policy
-        self._backend = backend if backend is not None else NativeBackend()
+        self._backend = backend if backend is not None else get_default_backend()
         self._current_task: asyncio.Task[Any] | None = None
         self._exit_handlers: list[TriggerHandle] = []
         self._cancel_reasons: list[CancelReason] = []
@@ -203,14 +204,16 @@ class Fence:
             self._exit_handlers = []
 
     def _on_trigger(self, reason: CancelReason) -> None:
+        if not self._admit(reason) or self._cancel_sent:
+            return
+
         if asyncio.current_task() is self._current_task:
             raise asyncio.InvalidStateError(
                 "Trigger callback fired synchronously inside the task. "
                 "Trigger.arm() callbacks must fire from the event loop, not inline."
             )
 
-        if self._admit(reason):
-            self._cancel()
+        self._cancel()
 
     def _admit(self, reason: CancelReason) -> bool:
         """

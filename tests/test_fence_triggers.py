@@ -339,6 +339,7 @@ async def test__fence__when_trigger_fires_inline__then_raises_invalid_state():
             await asyncio.sleep(0)
 
 
+@pytest.mark.backend("native")  # anyio re-cancels every await inside the fence
 async def test__fence__when_second_trigger_fires_during_cleanup__then_both_reasons_recorded():
     event1 = asyncio.Event()
     event2 = asyncio.Event()
@@ -365,6 +366,7 @@ async def test__fence__when_second_trigger_fires_during_cleanup__then_both_reaso
     assert asyncio.current_task().cancelling() == 0
 
 
+@pytest.mark.backend("native")  # anyio re-cancels every await inside the fence
 async def test__fence__when_second_trigger_fires_after_fence__then_post_fence_async_works():
     event1 = asyncio.Event()
     event2 = asyncio.Event()

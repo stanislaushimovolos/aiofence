@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Protocol
+from abc import ABC, abstractmethod
+from typing import Any
 
 
-class CancelHandle(Protocol):
+class CancelHandle(ABC):
     """
     One fence's cancellation, entered against one task.
 
@@ -14,15 +15,18 @@ class CancelHandle(Protocol):
     Always called on fence exit, cancel or not.
     """
 
+    @abstractmethod
     def cancel(self, message: str) -> None: ...
 
+    @abstractmethod
     def exit(self, exc_type: type[BaseException] | None, exc_val: BaseException | None) -> bool: ...
 
 
-class CancelBackend(Protocol):
+class CancelBackend(ABC):
     """
     Decides *how* a fence cancels its task. Triggers, policy and reasons
     are the fence's; the backend only owns delivery and ownership.
     """
 
+    @abstractmethod
     def enter(self, task: asyncio.Task[Any]) -> CancelHandle: ...

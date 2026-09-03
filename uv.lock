@@ -7,6 +7,9 @@ name = "aiofence"
 source = { editable = "." }
 
 [package.optional-dependencies]
+anyio = [
+    { name = "anyio" },
+]
 fastapi = [
     { name = "fastapi" },
 ]
@@ -16,6 +19,7 @@ starlette = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "anyio" },
     { name = "fastapi" },
     { name = "mypy" },
     { name = "pre-commit" },
@@ -30,13 +34,15 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", marker = "extra == 'anyio'", specifier = ">=4.11" },
     { name = "fastapi", marker = "extra == 'fastapi'", specifier = ">=0.118" },
     { name = "starlette", marker = "extra == 'starlette'", specifier = ">=0.42" },
 ]
-provides-extras = ["fastapi", "starlette"]
+provides-extras = ["anyio", "fastapi", "starlette"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "anyio", specifier = ">=4.11" },
     { name = "fastapi", specifier = ">=0.118" },
     { name = "mypy", specifier = ">=1.15.0" },
     { name = "pre-commit", specifier = ">=4.2.0" },

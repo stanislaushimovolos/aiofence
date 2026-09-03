@@ -19,9 +19,12 @@ dependencies = []
 # `aiofence.contrib` needs: FastAPI >= 0.118 tears yield dependencies down
 # after the response (0.106-0.117 did it before, which unbinds the disconnect
 # fencing for the whole streaming phase), and Starlette >= 0.42 has the ASGI
-# spec_version gate in StreamingResponse.
+# spec_version gate in StreamingResponse. anyio >= 4.11 is the first with
+# CancelScope.cancel(reason), which AnyioBackend uses to carry the fence's
+# reason text in the CancelledError.
 # See docs/disconnect-watcher-analysis.md.
 [project.optional-dependencies]
+anyio = ["anyio>=4.11"]
 fastapi = ["fastapi>=0.118"]
 starlette = ["starlette>=0.42"]
 
@@ -37,6 +40,7 @@ path = "aiofence/__version__.py"
 
 [dependency-groups]
 dev = [
+    "anyio>=4.11",
     "fastapi>=0.118",
     "mypy>=1.15.0",
     "pre-commit>=4.2.0",
@@ -55,6 +59,7 @@ strict = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = ["backend(*names): run only under the named cancel backends"]
 
 [tool.ruff]
 target-version = "py312"

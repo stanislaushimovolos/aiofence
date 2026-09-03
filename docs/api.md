@@ -280,6 +280,19 @@ with Fence(TimeoutTrigger(5), EventTrigger(shutdown, code="shutdown")) as fence:
 
 `Fence(*triggers, policy=None)` takes the same `CancelPolicy` that `Fencing.guard()` builds; `unless()` is builder-only sugar over it.
 
+### Cancel backend
+
+How a fence cancels its task is pluggable. The default, `NativeBackend`, is asyncio's own `task.cancel()`. `AnyioBackend` cancels through an `anyio.CancelScope` instead, so shields in anyio-based libraries (httpx, Starlette) hold and their cleanup completes:
+
+```python
+from aiofence import set_default_backend
+from aiofence.backends.anyio import AnyioBackend  # needs aiofence[anyio]
+
+set_default_backend(AnyioBackend())  # once, at startup
+```
+
+Every `Fence` built afterwards without an explicit `backend=` uses it, including those built by `Fencing` and `DisconnectMiddleware`. `Fence(backend=...)` overrides per fence. The trade-offs are in [architecture.md](architecture.md#cancel-backends).
+
 ## Starlette / FastAPI Integration
 
 The integration is two modules. `aiofence.contrib.starlette` holds [`DisconnectMiddleware`](#disconnectmiddleware--one-reader-for-the-channel), which owns the request's receive channel and publishes its disconnect event. `aiofence.contrib.fastapi` holds the dependencies that read it.
