@@ -76,7 +76,7 @@ ctx = on_deadline(T + 20, code="sla").timeout(5, code="db")
 # T+20 vs now+5 → minimum wins
 ```
 
-`.timeout()` eagerly resolves to an absolute deadline, making the `Fencing` **one-shot** (raises on reuse). Use `.deadline()` for reusable configs.
+`.timeout()` eagerly resolves to an absolute deadline and anchors the `Fencing` to the moment it was called. An anchored `Fencing` is per-operation: it can be opened as many times as needed at the call site, but `bind_fencing()` refuses it. Use `.deadline()` for a budget shared through the context.
 
 Events are never merged — all arm independently. Registrations are deduplicated on the `(event, code)` pair, so the same event under two different codes gives you two triggers and `cancelled_by()` answers `True` for both. The same event under the same code collapses to one.
 
@@ -205,7 +205,7 @@ elif fence.cancelled_by("shutdown"):
 
 ### Reusing a Fencing
 
-`Fencing` builders that use only `.deadline()` and `.event()` are reusable — each `move_on_cancel()` / `raise_on_cancel()` creates a fresh `Fence`:
+Every `Fencing` is reusable — each `move_on_cancel()` / `raise_on_cancel()` creates a fresh `Fence`:
 
 ```python
 ctx = on_deadline(loop.time() + 30)
@@ -217,7 +217,7 @@ with ctx.move_on_cancel() as f2:
     await op_b()
 ```
 
-**Note:** `.timeout()` anchors the builder to a point in time, making it one-shot. Reusing an anchored `Fencing` raises `RuntimeError`. Call `.timeout()` fresh each time instead.
+**Note:** `.timeout()` anchors the builder to the moment it was called, so every fence built from it shares that one deadline. That is what you want within a single operation, and a stale clock if the builder is kept at module level and reused across requests. Call `.timeout()` fresh each time, or use `.deadline()` where the budget is genuinely shared.
 
 ### Multiple triggers
 
@@ -242,8 +242,8 @@ elif fence.cancelled_by("shutdown"):
 ```python
 from aiofence import Fencing, bind_fencing, get_current_fencing, on_event
 
-# Boundary: declare the rules
-fencing = on_event(disconnect, code="disconnect").timeout(30)
+# Boundary: declare the rules — a shared budget is a deadline
+fencing = on_event(disconnect, code="disconnect").deadline(loop.time() + 30)
 with bind_fencing(fencing):
     await handle_request()
 
@@ -261,6 +261,7 @@ async def process_with_extra():
 ### Semantics
 
 - **`bind_fencing()` only stores config** — it does not create a Fence. `move_on_cancel()` / `raise_on_cancel()` materialize Fences from it.
+- **`bind_fencing()` refuses an anchored `Fencing`** — one built with `.timeout()` is per-operation, and the error is raised at the boundary rather than in the service code that later reads the context. Bind `.deadline()` for a request budget; inner code adds `.timeout()` for its own operation.
 - **Token-based set/reset** — nesting works naturally. Inner `bind_fencing()` overrides, outer is restored on exit.
 - **Task inheritance** — `asyncio.create_task()` copies the `ContextVar` automatically. Child tasks inherit the boundary's config without affecting the parent.
 - **`get_current_fencing()` with no context** — returns an empty `Fencing()`, so chaining always works: `get_current_fencing().timeout(5)`.

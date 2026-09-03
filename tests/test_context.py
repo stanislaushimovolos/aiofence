@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from aiofence import Fence, Fencing, bind_fencing, get_current_fencing
+
+
+def _deadline(seconds: float) -> float:
+    return asyncio.get_running_loop().time() + seconds
+
 
 # --- get_current_fencing() without context ---
 
@@ -18,13 +25,13 @@ async def test__get_current_fencing__when_no_context__then_returns_empty_fencing
 
 
 async def test__get_current_fencing__when_inside_bind__then_returns_stored_fencing() -> None:
-    original = Fencing().timeout(5, code="db")
+    original = Fencing().deadline(_deadline(5), code="db")
     with bind_fencing(original):
         assert get_current_fencing() is original
 
 
 async def test__bind_fencing__when_exited__then_context_restored() -> None:
-    with bind_fencing(Fencing().timeout(5)):
+    with bind_fencing(Fencing().deadline(_deadline(5))):
         pass
 
     fencing = get_current_fencing()
@@ -32,9 +39,9 @@ async def test__bind_fencing__when_exited__then_context_restored() -> None:
 
 
 async def test__bind_fencing__when_cancelled__then_context_restored() -> None:
-    original = Fencing().timeout(5, code="outer")
+    original = Fencing().deadline(_deadline(5), code="outer")
     with bind_fencing(original):
-        with bind_fencing(Fencing().timeout(0, code="inner")):
+        with bind_fencing(Fencing().deadline(_deadline(0), code="inner")):
             with get_current_fencing().move_on_cancel() as fence:
                 await asyncio.sleep(10)
 
@@ -48,14 +55,45 @@ async def test__bind_fencing__when_cancelled__then_context_restored() -> None:
 
 
 async def test__bind_fencing__when_nested__then_inner_overrides() -> None:
-    outer = Fencing().timeout(10, code="outer")
-    inner = Fencing().timeout(1, code="inner")
+    outer = Fencing().deadline(_deadline(10), code="outer")
+    inner = Fencing().deadline(_deadline(1), code="inner")
 
     with bind_fencing(outer):
         assert get_current_fencing() is outer
         with bind_fencing(inner):
             assert get_current_fencing() is inner
         assert get_current_fencing() is outer
+
+
+# --- Anchored builders ---
+
+
+async def test__bind_fencing__when_anchored__then_raises() -> None:
+    anchored = Fencing().timeout(5)
+
+    with pytest.raises(RuntimeError, match="per-operation"):
+        with bind_fencing(anchored):
+            pass
+
+
+async def test__bind_fencing__when_anchored__then_context_untouched() -> None:
+    with pytest.raises(RuntimeError):
+        with bind_fencing(Fencing().timeout(5)):
+            pass
+
+    assert get_current_fencing()._deadline is None
+
+
+async def test__bind_fencing__when_deadline_bound__then_inner_fences_twice() -> None:
+    with bind_fencing(Fencing().deadline(_deadline(100), code="budget")):
+        with get_current_fencing().move_on_cancel() as first:
+            pass
+        with get_current_fencing().move_on_cancel() as second:
+            pass
+
+    assert first is not second
+    assert not first.cancelled
+    assert not second.cancelled
 
 
 # --- Task inheritance ---
@@ -68,7 +106,7 @@ async def test__bind_fencing__when_create_task__then_child_inherits() -> None:
         nonlocal inherited
         inherited = get_current_fencing()
 
-    original = Fencing().timeout(5, code="parent")
+    original = Fencing().deadline(_deadline(5), code="parent")
     with bind_fencing(original):
         task = asyncio.create_task(child())
         await task
@@ -81,17 +119,16 @@ async def test__bind_fencing__when_child_rebinds__then_parent_unaffected() -> No
 
     async def child() -> None:
         nonlocal child_seen
-        with bind_fencing(Fencing().timeout(1, code="child")):
+        with bind_fencing(Fencing().deadline(_deadline(1), code="child")):
             child_seen = get_current_fencing()
 
-    original = Fencing().timeout(5, code="parent")
+    original = Fencing().deadline(_deadline(5), code="parent")
     with bind_fencing(original):
         task = asyncio.create_task(child())
         await task
         assert get_current_fencing() is original
 
     assert child_seen is not original
-    assert child_seen._anchored is True
     assert child_seen._deadline_code == "child"
 
 
@@ -99,7 +136,7 @@ async def test__bind_fencing__when_child_rebinds__then_parent_unaffected() -> No
 
 
 async def test__get_current_fencing__move_on_cancel__when_timeout_fires__then_cancelled() -> None:
-    with bind_fencing(Fencing().timeout(0, code="ctx")):
+    with bind_fencing(Fencing().deadline(_deadline(0), code="ctx")):
         with get_current_fencing().move_on_cancel() as fence:
             await asyncio.sleep(10)
 
@@ -112,7 +149,7 @@ async def test__get_current_fencing__when_extended_with_event__then_works() -> N
     ev = asyncio.Event()
     ev.set()
 
-    with bind_fencing(Fencing().timeout(100)):
+    with bind_fencing(Fencing().deadline(_deadline(100))):
         with get_current_fencing().event(ev, code="ev").move_on_cancel() as fence:
             await asyncio.sleep(10)
 

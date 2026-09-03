@@ -94,8 +94,8 @@ with fencing.timeout(5, code="db").move_on_cancel() as fence:
 **Context propagation** — store a `Fencing` in a `ContextVar` at the boundary, read it anywhere with `get_current_fencing()`. No need to pass configs through every call signature:
 
 ```python
-# HTTP handler boundary
-with bind_fencing(on_event(disconnect, code="disconnect").timeout(30)):
+# HTTP handler boundary — a shared budget is a deadline
+with bind_fencing(on_event(disconnect, code="disconnect").deadline(loop.time() + 30)):
     await handle_request()
 
 # deep inside, no arguments needed
