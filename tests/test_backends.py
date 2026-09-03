@@ -5,6 +5,7 @@ import pytest
 
 from aiofence import EventTrigger, Fence, TimeoutTrigger
 from aiofence.backends import CancelBackend, CancelHandle, NativeBackend, get_default_backend
+from aiofence.backends.anyio import AnyioBackend
 
 
 class RecordingBackend(CancelBackend):
@@ -166,3 +167,24 @@ async def test__native_handle__when_outer_cancel_also_pending__then_does_not_sup
 
     assert not suppressed
     assert task.uncancel() == 0
+
+
+@pytest.mark.backend("anyio")
+async def test__anyio_handle__when_foreign_cancel_outstanding__then_propagates():
+    task = asyncio.current_task()
+    assert task is not None
+    event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def cut_twice() -> None:
+        event.set()  # fence's cancel is delivered next tick, with anyio's message
+        loop.call_soon(task.cancel, "outer")  # same tick, right after it: counter goes to 2
+
+    loop.call_soon(cut_twice)
+    with pytest.raises(asyncio.CancelledError):
+        with Fence(EventTrigger(event), backend=AnyioBackend()) as fence:
+            await asyncio.sleep(10)
+
+    assert fence.cancelled
+    assert not fence.suppressed
+    assert task.uncancel() == 0  # only the outer cancel was left on the counter
