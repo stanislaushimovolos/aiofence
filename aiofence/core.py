@@ -189,10 +189,7 @@ class Fence:
                 guard.disarm()
 
         try:
-            if self._handle is None:
-                return False
-
-            self._suppressed = self._handle.exit(exc_type, exc_val)
+            self._suppressed = self._require_handle().exit(exc_type, exc_val)
             return self._suppressed
         finally:
             if self._current_task is not None:
@@ -239,14 +236,13 @@ class Fence:
 
     def _cancel(self) -> None:
         """
-        Deliver the first accepted reason through the backend, once.
-        Later accepted reasons are recorded only.
+        Deliver the first accepted reason through the backend. Callers
+        send at most once; later accepted reasons are recorded only.
         """
-        if self._handle is None:
-            raise RuntimeError("Fence._cancel() called before __enter__")
-
-        if self._cancel_sent:
-            return
-
         self._cancel_sent = True
-        self._handle.cancel(self._cancel_reasons[0].message)
+        self._require_handle().cancel(self._cancel_reasons[0].message)
+
+    def _require_handle(self) -> CancelHandle:
+        if self._handle is None:
+            raise RuntimeError("Fence used before __enter__")
+        return self._handle

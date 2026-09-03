@@ -175,6 +175,16 @@ async def test__native_handle__when_outer_cancel_also_pending__then_does_not_sup
     assert task.uncancel() == 0
 
 
+async def test__anyio_backend__when_entered_for_another_task__then_raises():
+    other = asyncio.create_task(asyncio.sleep(0))
+
+    try:
+        with pytest.raises(RuntimeError, match="task it cancels"):
+            AnyioBackend().enter(other)
+    finally:
+        await other
+
+
 @pytest.mark.backend("anyio")
 async def test__anyio_handle__when_foreign_cancel_outstanding__then_propagates():
     task = asyncio.current_task()
