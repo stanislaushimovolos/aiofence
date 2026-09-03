@@ -142,7 +142,7 @@ The completion flag does not get to decide alone. From ASGI spec 2.4 a server ma
 
 The read loop stops as soon as it records a disconnect: uvicorn re-delivers the message immediately and forever, so reading past it would spin for the rest of the request, background-task phase included.
 
-Replay settles that both readers are *told*, not who acts first. A fenced streaming body can therefore outlive its rival listener's cancel scope — `move_on_cancel()` suppressed the cancellation deliberately, so the generator resumes and emits its last chunk. That last chunk lands quietly on every server shipping today; against a spec-2.4 server it is the send that raises, which `StreamingResponse` reports as `ClientDisconnect`.
+Replay settles that both readers are *told*, not who acts first. Under the middleware's default `AnyioBackend`, a fence inside a streaming body sits within sse-starlette's own task group scope; when the rival listener cancels that group the fence defers to it and the generator is torn down mid-await, so nothing after the fence in the generator runs once the client is gone. On `NativeBackend` the fence's cancel lands first and is suppressed, and the generator resumes for its last chunk — which lands quietly on every server shipping today and, against a spec-2.4 server, is the send that raises `ClientDisconnect`.
 
 ## Why This Complexity Is Necessary
 

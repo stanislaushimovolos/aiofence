@@ -561,7 +561,7 @@ Both the scope key and the context binding are dropped when the request ends, so
 
 `http.request` messages are forwarded downstream in order and unchanged, and `http.disconnect` is treated as a terminal side channel — recorded rather than queued, and answered on every later `receive()` once the buffered body has been drained. An `OSError` out of `send` — what a spec-2.4 server raises on a closed connection — is recorded the same way and re-raised, so the application still sees it.
 
-What replay settles is that both readers are *told*. Which one acts first is still a scheduling matter, and a fenced body legitimately outlives its rival listener's cancel scope: `move_on_cancel()` suppressed the cancellation on purpose, so the generator resumes and emits its last chunk. An unfenced body is still torn down by the rival listener, as before.
+What replay settles is that both readers are *told*. Which one acts first is a scheduling matter, and the answer depends on the [backend](#which-backend-cancels): under the default anyio delivery a fenced streaming body defers to its rival listener's cancelled task group and is torn down, so put finalisation in a `finally` rather than after the fence; under native delivery the fence's cancel lands first, is suppressed, and the generator resumes for its last chunk. An unfenced body is torn down by the rival listener either way.
 
 ##### Fencing a raw body read
 
@@ -578,7 +578,7 @@ if fence.cancelled_by(DISCONNECT_CODE):        # client left while the read was 
     return Response(status_code=499)
 ```
 
-Which one you get depends on whether the read was already parked when the client left. Parked, the fence wins: recording a disconnect sets the event *before* waking the reader, so the fence's cancel is queued ahead of the reply. Entered afterwards, the fence's cancel is only scheduled (see [Deferred Cancel](architecture.md#deferred-cancel-via-call_soon)) while the buffered body and the recorded disconnect are answered from state without suspending — Starlette raises `ClientDisconnect` first. Plain uvicorn behaves the same way: its `receive()` skips its own `await` once the connection is gone. Fences around anything other than a channel read are unaffected.
+Under the middleware's default anyio delivery it is `ClientDisconnect` in both cases: the reply is already on its way when the disconnect is recorded, and anyio never cancels a task whose wakeup has already resolved. Plain uvicorn behaves the same way — its `receive()` skips its own `await` once the connection is gone. Under native delivery a read that was parked when the client left is cancelled instead: recording a disconnect sets the event *before* waking the reader, so the fence's cancel is queued ahead of the reply. Entered afterwards, the fence's cancel is only scheduled (see [Deferred Cancel](architecture.md#deferred-cancel-via-call_soon)) while the buffered body and the recorded disconnect are answered from state without suspending, and Starlette raises first. Fences around anything other than a channel read are unaffected.
 
 #### The middleware's own binding
 
