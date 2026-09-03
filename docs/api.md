@@ -291,7 +291,7 @@ from aiofence.backends.anyio import AnyioBackend  # needs aiofence[anyio]
 set_default_backend(AnyioBackend())  # once, at startup
 ```
 
-Every `Fence` built afterwards without an explicit `backend=` uses it, including those built by `Fencing` and `DisconnectMiddleware`. `Fence(backend=...)` overrides per fence. The trade-offs are in [architecture.md](architecture.md#cancel-backends).
+Every `Fence` built afterwards without an explicit `backend=` uses it, `Fencing`-built ones included. `Fence(backend=...)` overrides per fence. `aiofence.backends.bind_backend(backend)` is the scoped form: a context manager whose backend wins over the process default in the current task and in tasks it spawns — it is how [`DisconnectMiddleware` picks anyio per request](#which-backend-cancels). The trade-offs are in [architecture.md](architecture.md#cancel-backends).
 
 ## Starlette / FastAPI Integration
 
@@ -619,6 +619,18 @@ async def finalize_upload(chunks):
 ```
 
 That keeps the decision visible in the code that cares about it, and leaves every other fence in the request disconnect-aware.
+
+#### Which backend cancels
+
+Under the middleware every fence — ambient, dependency-built, or a bare `Fence(...)` — cancels through `AnyioBackend` by default, for the request and the tasks it spawns. Starlette and httpx wrap their cleanup in anyio shields, and only a cancel delivered by anyio respects them; a native `task.cancel()` landing inside httpcore's connection close can cost the pool a slot for good ([why](architecture.md#cancel-backends)). Installing the middleware is therefore also opting into anyio delivery. The `backend` parameter is the way out, per app:
+
+```python
+from aiofence import NativeBackend
+
+app = FastAPI(middleware=[Middleware(DisconnectMiddleware, backend=NativeBackend())])
+```
+
+The middleware's backend takes precedence over `set_default_backend()` for the request; `Fence(backend=...)` still wins over both. Code outside the request — lifespan, work on a thread — keeps the process default.
 
 #### Choosing what to watch
 

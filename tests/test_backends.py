@@ -4,7 +4,13 @@ from typing import Any
 import pytest
 
 from aiofence import EventTrigger, Fence, TimeoutTrigger
-from aiofence.backends import CancelBackend, CancelHandle, NativeBackend, get_default_backend
+from aiofence.backends import (
+    CancelBackend,
+    CancelHandle,
+    NativeBackend,
+    bind_backend,
+    get_default_backend,
+)
 from aiofence.backends.anyio import AnyioBackend
 
 
@@ -188,3 +194,42 @@ async def test__anyio_handle__when_foreign_cancel_outstanding__then_propagates()
     assert fence.cancelled
     assert not fence.suppressed
     assert task.uncancel() == 0  # only the outer cancel was left on the counter
+
+
+async def test__bind_backend__when_active__then_fence_without_backend_uses_it():
+    bound = NativeBackend()
+
+    with bind_backend(bound):
+        fence = Fence()
+
+    assert fence._backend is bound
+
+
+async def test__bind_backend__when_exited__then_process_default_restored():
+    before = get_default_backend()
+
+    with bind_backend(NativeBackend()):
+        pass
+
+    assert Fence()._backend is before
+
+
+async def test__bind_backend__when_task_spawned_inside__then_task_inherits_it():
+    bound = NativeBackend()
+
+    async def build() -> CancelBackend:
+        return Fence()._backend
+
+    with bind_backend(bound):
+        task = asyncio.create_task(build())
+
+    assert await task is bound
+
+
+async def test__fence__when_explicit_backend_given_under_bind__then_explicit_wins():
+    explicit = NativeBackend()
+
+    with bind_backend(NativeBackend()):
+        fence = Fence(backend=explicit)
+
+    assert fence._backend is explicit

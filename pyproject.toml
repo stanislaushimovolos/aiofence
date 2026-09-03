@@ -25,8 +25,8 @@ dependencies = []
 # See docs/disconnect-watcher-analysis.md.
 [project.optional-dependencies]
 anyio = ["anyio>=4.11"]
-fastapi = ["fastapi>=0.118"]
-starlette = ["starlette>=0.42"]
+fastapi = ["fastapi>=0.118", "anyio>=4.11"]
+starlette = ["starlette>=0.42", "anyio>=4.11"]
 
 [project.urls]
 Repository = "https://github.com/stanislaushimovolos/aiofence"
