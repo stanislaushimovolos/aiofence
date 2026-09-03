@@ -73,13 +73,11 @@ with (
 await db.save(result or fallback)  # always runs, no shield needed
 ```
 
-### Why not `anyio`?
+### aiofence and anyio
 
-`anyio` is one of the best async libraries in the Python ecosystem, and its `CancelScope` is a more powerful and general cancellation model than what `asyncio` provides natively. `aiofence` is narrower in scope and makes different trade-offs:
+`anyio.CancelScope` is the best cancellation *delivery* mechanism asyncio has: one scope, one deadline, one `cancel()`, shields honoured. What it does not do is the layer above delivery. It cannot say which of several sources fired, has no ambient "these are the cancellation sources for this request", no way to decline a reason under a precondition, and nothing for ASGI disconnects. `aiofence` is that layer, and it is not a replacement: on Starlette and FastAPI it cancels *through* anyio (`AnyioBackend`, the middleware's default), so the shields httpx and Starlette wrap their cleanup in hold. On plain asyncio it uses `task.cancel()` directly and needs no dependency.
 
-1. **Drop-in for existing asyncio code.** `anyio` builds an explicit scope tree that replaces asyncio's cancellation model — its own cancel delivery, shielding, deadline aggregation, and cross-task propagation. If your app is already built on pure asyncio, adopting `anyio` is a significant migration. `aiofence` works directly with asyncio's `cancel()`/`uncancel()` counter protocol — no new runtime, no new cancellation model. If asyncio evolves its cancellation primitives, `aiofence` stays compatible.
-
-2. **Different design philosophy.** `anyio`'s approach is a broad `CancelScope` over the whole operation, with `CancelScope(shield=True)` around the parts that must survive. `aiofence` takes the inverse: most code runs unaware of cancellation, and you wrap only the expensive, safely-interruptible parts with a `Fence`.
+The philosophies also differ, and compose. `anyio` puts one broad `CancelScope` over the operation and shields the parts that must survive. `aiofence` wraps only the expensive, safely interruptible part you *want* cancelled, and lets everything else run unaware. Inside a fence, library shields still hold.
 
 ## Features
 
@@ -123,7 +121,7 @@ with get_current_fencing().unless(generation.is_done, code="disconnect").move_on
         yield chunk
 ```
 
-**Native asyncio** — works with asyncio's `cancel()`/`uncancel()` counter protocol. Compatible with `TaskGroup`, `asyncio.timeout()`. No new runtime, no dependencies.
+**Native asyncio, anyio optional** — the core has no dependencies and cancels through asyncio's own `cancel()`/`uncancel()` counter protocol, compatible with `TaskGroup` and `asyncio.timeout()`. How the cancel is delivered is a pluggable [backend](docs/api.md#cancel-backend): `AnyioBackend` (the `aiofence[anyio]` extra) cancels through an `anyio.CancelScope` instead, and `DisconnectMiddleware` uses it by default.
 
 ## Client disconnects
 
@@ -170,6 +168,8 @@ async def generate_response(prompt: str) -> str:
     return result
 ```
 
+Under the middleware every fence cancels through anyio, so an httpx call cut short by a disconnect finishes closing its connection instead of leaking a pool slot — the shields anyio-based libraries rely on hold. Pass `DisconnectMiddleware(backend=NativeBackend())` to opt an app out; see [which backend cancels](docs/api.md#which-backend-cancels).
+
 Code with no dependency and no `Request` to hand can read the event straight from the ambient request:
 
 ```python
@@ -191,12 +191,12 @@ An ASGI receive channel has exactly one useful reader — `receive()` is a queue
 
 Full reasoning in [Disconnect Delivery — Design Rationale](docs/disconnect-watcher-analysis.md) and [Architecture](docs/architecture.md#disconnect-delivery-replay-and-record).
 
-Requires `starlette` (installed with FastAPI). No additional dependencies.
+Requires `starlette` (installed with FastAPI) and `anyio>=4.11`, which Starlette already brings — `pip install aiofence[starlette]` or `aiofence[fastapi]`.
 
 ## Documentation
 
 - [API Guide](docs/api.md) — usage, patterns, and examples
-- [Architecture](docs/architecture.md) — how it works, cancellation flow, design decisions
+- [Architecture](docs/architecture.md) — how it works, cancellation flow, design decisions; [Cancel Backends](docs/architecture.md#cancel-backends) for native vs anyio delivery
 - [Why Suppress](docs/why-suppress.md) — why `CancelledError` is suppressed instead of raised
 - [Disconnect Delivery — Design Rationale](docs/disconnect-watcher-analysis.md) — why the middleware owns the receive channel, and why the dependencies have no fallback
 - [CPython Task Cancellation](docs/cpython-task-cancellation.md) — how `asyncio.Task` cancellation works under the hood

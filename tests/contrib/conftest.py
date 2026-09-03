@@ -1,8 +1,23 @@
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import suppress
+from functools import partialmethod
 
 import pytest
+
+from aiofence.backends import CancelBackend
+from aiofence.contrib.starlette import DisconnectMiddleware
+
+
+@pytest.fixture(autouse=True)
+def _middleware_backend(monkeypatch: pytest.MonkeyPatch, _cancel_backend: CancelBackend) -> None:
+    """
+    ``DisconnectMiddleware`` defaults to anyio whatever the process default is,
+    which would pin every contrib test to one backend. Route its default through
+    the parametrised one instead; an explicit ``backend=`` still wins.
+    """
+    init = partialmethod(DisconnectMiddleware.__init__, backend=_cancel_backend)
+    monkeypatch.setattr(DisconnectMiddleware, "__init__", init)
 
 
 @pytest.fixture

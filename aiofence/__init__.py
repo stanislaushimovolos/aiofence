@@ -8,6 +8,7 @@ from .api import (
     on_event,
     on_timeout,
 )
+from .backends import CancelBackend, NativeBackend, get_default_backend, set_default_backend
 from .core import (
     CancelPolicy,
     CancelReason,
@@ -24,6 +25,7 @@ from .triggers import (
 )
 
 __all__ = [
+    "CancelBackend",
     "CancelPolicy",
     "CancelReason",
     "CancelType",
@@ -32,6 +34,7 @@ __all__ = [
     "Fence",
     "FenceCancelled",
     "Fencing",
+    "NativeBackend",
     "TimeoutHandle",
     "TimeoutTrigger",
     "Trigger",
@@ -39,7 +42,9 @@ __all__ = [
     "__version__",
     "bind_fencing",
     "get_current_fencing",
+    "get_default_backend",
     "on_deadline",
     "on_event",
     "on_timeout",
+    "set_default_backend",
 ]

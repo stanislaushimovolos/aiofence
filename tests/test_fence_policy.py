@@ -123,7 +123,7 @@ async def test__fence__when_pre_check_declined_and_live_timeout__then_timeout_fi
 
 async def test__fence__when_pre_check_declined__then_no_cancel_scheduled(set_event):
     with Fence(EventTrigger(set_event, code="ev"), policy=decline) as fence:
-        assert fence._cancel_token is None
+        assert not fence._cancel_sent
         assert fence._armed
 
 

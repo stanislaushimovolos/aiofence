@@ -1,6 +1,10 @@
 import asyncio
+from collections.abc import Iterator
 
 import pytest
+
+from aiofence import CancelBackend, NativeBackend, get_default_backend, set_default_backend
+from aiofence.backends.anyio import AnyioBackend
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -14,6 +18,26 @@ def event_loop_policy(request: pytest.FixtureRequest) -> asyncio.AbstractEventLo
 
         return uvloop.EventLoopPolicy()
     return asyncio.DefaultEventLoopPolicy()
+
+
+BACKENDS: dict[str, type[CancelBackend]] = {"native": NativeBackend, "anyio": AnyioBackend}
+
+
+@pytest.fixture(autouse=True, params=list(BACKENDS))
+def _cancel_backend(request: pytest.FixtureRequest) -> Iterator[CancelBackend]:
+    """
+    Runs every test under both cancel backends. ``@pytest.mark.backend("native")``
+    keeps a test on the backends it names.
+    """
+    only = request.node.get_closest_marker("backend")
+    if only is not None and request.param not in only.args:
+        pytest.skip(f"{request.param} backend")
+
+    previous = get_default_backend()
+    backend = BACKENDS[request.param]()
+    set_default_backend(backend)
+    yield backend
+    set_default_backend(previous)
 
 
 def _active_handles(loop: asyncio.AbstractEventLoop) -> int:

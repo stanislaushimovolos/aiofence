@@ -57,9 +57,10 @@ the channel exactly once and replays what it read to everyone below.
 The read loop stops as soon as it records a disconnect — uvicorn re-delivers the message
 immediately and forever, so reading past it would spin for the rest of the request.
 
-Replay settles that both readers are *told*, not which acts first. A fenced streaming body
-can therefore outlive its rival listener's cancel scope: `move_on_cancel()` suppressed the
-cancellation deliberately, so the generator resumes and emits its last chunk.
+Replay settles that both readers are *told*, not which acts first. Under the middleware's
+default anyio backend a fenced streaming body defers to its rival listener's cancelled task
+group and is torn down; on the native backend the fence's cancel lands first, is suppressed,
+and the generator resumes for its last chunk.
 
 ## Why there is no fallback
 

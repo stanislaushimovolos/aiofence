@@ -22,6 +22,8 @@ from inspect import isawaitable
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from aiofence import bind_fencing, get_current_fencing
+from aiofence.backends import CancelBackend, bind_backend
+from aiofence.backends.anyio import AnyioBackend
 
 from .api import DISCONNECT_CODE, DISCONNECT_EVENT_SCOPE_KEY, _publish
 
@@ -40,6 +42,12 @@ class DisconnectMiddleware:
 
     Args:
         app: Next ASGI application in the stack.
+        backend: How fences below cancel their task, for the whole request —
+            tasks it spawns included. Defaults to ``AnyioBackend``, so the
+            shields anyio-based libraries (httpx, Starlette) wrap their cleanup
+            in hold; pass ``NativeBackend()`` for asyncio's own ``task.cancel()``.
+            Takes precedence over ``set_default_backend`` for the request;
+            ``Fence(backend=...)`` still wins. Trade-offs: docs/architecture.md.
         fencing_code: Code the disconnect event is bound under, via
             ``get_current_fencing().event(event, code=fencing_code)``, for the
             whole request. Defaults to ``DISCONNECT_CODE``, which is what
@@ -64,11 +72,13 @@ class DisconnectMiddleware:
         self,
         app: ASGIApp,
         *,
+        backend: CancelBackend | None = None,
         fencing_code: str = DISCONNECT_CODE,
         on_disconnect: DisconnectCallback | None = None,
         watch: WatchPredicate | None = None,
     ) -> None:
         self.app = app
+        self.backend: CancelBackend = backend if backend is not None else AnyioBackend()
         self.fencing_code = fencing_code
         self.on_disconnect = on_disconnect
         self.watch: WatchPredicate = watch or _watch_every_request
@@ -110,7 +120,7 @@ class DisconnectMiddleware:
         # handlers still see it. Work that must outlive the client fences on a
         # fresh Fencing() instead.
         fencing = get_current_fencing().event(channel.disconnect_event, code=self.fencing_code)
-        with bind_fencing(fencing):
+        with bind_backend(self.backend), bind_fencing(fencing):
             await self.app(scope, channel.receive, channel.wrap_send(send))
 
 

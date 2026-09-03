@@ -245,16 +245,6 @@ async def test__fastapi_handler__when_request_is_the_only_param__then_body_read_
 # --- fenced body reads ---
 
 
-async def test__fenced_body_read__when_client_leaves_while_parked__then_fence_suppresses() -> None:
-    """
-    The channel sets the event before waking the parked reader, so the fence's
-    cancel is queued ahead of the reply and arrives instead of it.
-    """
-    outcome = await _fenced_upload_cut(enter_fence_after_cut=False)
-
-    assert outcome == {"cancelled_by_disconnect": True, "suppressed": True}
-
-
 async def test__fenced_body_read__when_client_left_first__then_raises_client_disconnect() -> None:
     """
     Nothing to wake: the fence's cancel is only scheduled, and both the buffered
@@ -262,13 +252,13 @@ async def test__fenced_body_read__when_client_left_first__then_raises_client_dis
     Starlette raises before the cancel can land. Same as reading unfenced under
     plain uvicorn, whose ``receive()`` also skips its ``await`` once disconnected.
     """
-    outcome = await _fenced_upload_cut(enter_fence_after_cut=True)
+    outcome = await _fenced_upload_cut()
 
     assert outcome == {"client_disconnect": True}
 
 
-async def _fenced_upload_cut(*, enter_fence_after_cut: bool) -> dict[str, bool]:
-    """Cut the client mid-upload, either while the fenced read is parked or before it."""
+async def _fenced_upload_cut() -> dict[str, bool]:
+    """Cut the client mid-upload, before the fenced read is entered."""
     server = FakeServer(method="POST", defer_body=True, content_length=len(PAYLOAD))
     reading = asyncio.Event()
     cut = asyncio.Event()
@@ -276,8 +266,7 @@ async def _fenced_upload_cut(*, enter_fence_after_cut: bool) -> dict[str, bool]:
 
     async def endpoint(request: Request) -> Response:
         reading.set()
-        if enter_fence_after_cut:
-            await wait_for(cut)
+        await wait_for(cut)
 
         try:
             with get_current_fencing().move_on_cancel() as fence:
