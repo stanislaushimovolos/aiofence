@@ -12,7 +12,10 @@ broadcast. There is no peek and no put-back. But a request routinely has several
 parties — the disconnect dependency, `StreamingResponse.listen_for_disconnect`,
 sse-starlette's listener, `Request.is_disconnected()`, and the body reader. Whoever reads
 first consumes the message; on hypercorn, daphne and granian each message is delivered
-exactly once, so everyone else starves.
+exactly once, so everyone else starves. `is_disconnected()` is the worst of them: it pops
+the next message and discards it whatever it is, body chunk included. The middleware makes
+the disconnect observable to every reader below; it does not make that method safe next to
+a body read. The published event replaces it.
 
 **2. `http.disconnect` does not mean "the client disconnected".** Per the ASGI spec it is
 sent "if receive is called after a response has been sent **or** after the connection has

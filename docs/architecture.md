@@ -72,7 +72,7 @@ Three alternatives were considered and rejected. All lose worker control (code a
        # remaining(1) > baseline(0) → "not my cancel" → no TimeoutError
    ```
 
-Suppression is the only approach that preserves worker control and is composable with `TaskGroup`, `asyncio.timeout`, and nested Fences.
+Suppression is the only approach that preserves worker control and is composable with `TaskGroup` and `asyncio.timeout`. Nested Fences on one task are not supported yet — a second `__enter__` raises `RuntimeError` — but the same counter reasoning is what will let them compose once they are; see [#12](https://github.com/stanislaushimovolos/aiofence/issues/12).
 
 ### Pre-triggered behavior
 
@@ -118,7 +118,7 @@ Cleanup after a suppressed cancel belongs after the `with` block on either backe
 - **Sync context manager**: `__enter__`/`__exit__` (not async). Event loop interaction happens via callbacks and `call_soon`, not awaits.
 - **Single mode**: No split between "raise" and "suppress" modes. Fence always suppresses. If the caller wants to raise, they do it themselves after checking `fence.cancelled` / `fence.suppressed`.
 - **No custom exception types**: No `FenceTimeout` or `FenceCancelled`. Keeps the API surface minimal and avoids `CancelledError` subclass pitfalls.
-- **No scope tree / shielding of our own**: Nesting and shielding handled by asyncio itself (`asyncio.shield()`, `uncancel()` counting). `AnyioBackend` opts into anyio's scope tree for delivery only; the fence still records reasons and settles ownership the same way.
+- **No scope tree / shielding of our own**: Shielding is asyncio's (`asyncio.shield()`) and ownership against outer scopes is settled by `uncancel()` counting. Nested Fences on one task are rejected at `__enter__` for now ([#12](https://github.com/stanislaushimovolos/aiofence/issues/12)). `AnyioBackend` opts into anyio's scope tree for delivery only; the fence still records reasons and settles ownership the same way.
 - **Deadlines vs timeouts**: Core library works with relative timeouts (`TimeoutTrigger`). Deadlines (absolute time) are an application-layer concern — middleware converts remaining budget to `TimeoutTrigger(remaining)`.
 
 
@@ -132,7 +132,7 @@ Wire protocol is always relative duration. Each service converts to local timeou
 
 Three properties make the arbitration correct, and each is load-bearing:
 
-- **Replay, don't discard.** The read loop forwards every `http.request` message downstream in order and unchanged. The alternative — the dependency's watcher, which discards anything that isn't a disconnect — steals body chunks, and the loser of that race gets `{"body": b"", "more_body": False}`, which Starlette accepts as a *complete, empty* body. Silent truncation, no exception, no log.
+- **Replay, don't discard.** The read loop forwards every `http.request` message downstream in order and unchanged. The alternative — the dependency's watcher, which discards anything that isn't a disconnect — steals body chunks, and the loser of that race gets `{"body": b"", "more_body": False}`, which Starlette accepts as a *complete, empty* body. Silent truncation, no exception, no log. Replay makes every reader *see* the disconnect; it does not make `Request.is_disconnected()` safe next to a body read. That method pops and discards whatever message is next, body chunks included, above or below the middleware — the published event is the replacement, not a companion.
 - **Record, don't queue.** The disconnect is a terminal side channel: recorded once and answered on every later `receive()`, rather than queued as a message of its own that the first reader would consume. Buffered body messages are still handed over first; the event itself is set the moment the disconnect arrives. That turns a one-shot server delivery into a signal every reader below can observe, and it keeps the middleware from needing a bounded queue of its own. Draining the server's queue also matters in itself — hypercorn bounds its app queue at 10 messages and blocks the connection when it fills.
 - **Track response completion in a wrapped `send`.** Per the ASGI spec `http.disconnect` means "the stream ended", not "the client left": every server sends it once the response is complete. The middleware flips its flag *before* handing the terminal message to the server's `send`, because the read loop can only be woken by the server having processed that message. A disconnect recorded after that point is replayed downstream but does **not** set the event — which is what keeps `BackgroundTasks` and post-response work from being cancelled on every successful request. This is the only place in the stack where the two meanings can be told apart.
 
