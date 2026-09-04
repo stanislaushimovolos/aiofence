@@ -6,7 +6,7 @@
 
 [![codecov](https://codecov.io/gh/stanislaushimovolos/aiofence/branch/main/graph/badge.svg)](https://codecov.io/gh/stanislaushimovolos/aiofence)
 
-Multi-reason cancellation contexts for Python asyncio. Inspired by Go's `context.Context`, `aiofence` provides a cancellation context that propagates hierarchically through your application via `ContextVar` — no need to thread events, flags, or tokens through every call signature. Declare cancellation sources once at the boundary — inner code just wraps cancellable work in a context manager and doesn't care about the actual reasons, though it can inspect them if needed.
+Multi-reason cancellation for Python asyncio. A request rarely has one reason to stop: the client disconnects, the budget runs out, the service shuts down. Each arrives through a different mechanism, and handling them together means threading events, timeouts and flags through every call signature. Inspired by Go's `context.Context`, `aiofence` declares the sources once at the boundary and propagates them via `ContextVar` — inner code wraps cancellable work in a `Fence`, doesn't care about the actual reasons, and can ask afterwards which one fired.
 
 **The flagship use case is client disconnect.** An inference or agent service burns GPU time and provider spend on requests nobody is listening to any more, and ASGI gives you exactly one shot at noticing. `DisconnectMiddleware` turns that one-shot signal into an ambient cancellation source, so any code below it can stop the work the moment the client goes away — with no `Request` in its signature and no wiring through the call stack. See [Client disconnects](#client-disconnects).
 
@@ -75,7 +75,7 @@ await db.save(result or fallback)  # always runs, no shield needed
 
 ### aiofence and anyio
 
-`anyio.CancelScope` is the best cancellation *delivery* mechanism asyncio has: one scope, one deadline, one `cancel()`, shields honoured. What it does not do is the layer above delivery. It cannot say which of several sources fired, has no ambient "these are the cancellation sources for this request", no way to decline a reason under a precondition, and nothing for ASGI disconnects. `aiofence` is that layer, and it is not a replacement: on Starlette and FastAPI it cancels *through* anyio (`AnyioBackend`, the middleware's default), so the shields httpx and Starlette wrap their cleanup in hold. On plain asyncio it uses `task.cancel()` directly and needs no dependency.
+`anyio.CancelScope` is the best cancellation *delivery* mechanism asyncio has: one scope, one deadline, one `cancel()`, shields honoured. What it does not do is the layer above delivery. It cannot say which of several sources fired, has no ambient "these are the cancellation sources for this request", no way to decline a reason under a precondition, and nothing for ASGI disconnects. `aiofence` is that layer, not a replacement: by default a fence cancels *through* an `anyio.CancelScope`, so the shields httpx and Starlette wrap their cleanup in hold.
 
 The philosophies also differ, and compose. `anyio` puts one broad `CancelScope` over the operation and shields the parts that must survive. `aiofence` wraps only the expensive, safely interruptible part you *want* cancelled, and lets everything else run unaware. Inside a fence, library shields still hold.
 
@@ -121,7 +121,7 @@ with get_current_fencing().unless(generation.is_done, code="disconnect").move_on
         yield chunk
 ```
 
-**Native asyncio, anyio optional** — the core has no dependencies and cancels through asyncio's own `cancel()`/`uncancel()` counter protocol, compatible with `TaskGroup` and `asyncio.timeout()`. How the cancel is delivered is a pluggable [backend](docs/api.md#cancel-backend): `AnyioBackend` (the `aiofence[anyio]` extra) cancels through an `anyio.CancelScope` instead, and `DisconnectMiddleware` uses it by default.
+**Two delivery modes** — how the cancel reaches the task is a pluggable [backend](docs/api.md#cancel-backend). `AnyioBackend`, the default, cancels through an `anyio.CancelScope`: nested fences work, and the shields httpx and Starlette rely on hold. `NativeBackend` cancels with asyncio's own `task.cancel()` instead — edge-triggered, on the `cancel()`/`uncancel()` counter protocol, composable with `TaskGroup` and `asyncio.timeout()`. Switch process-wide with `set_default_backend()`; triggers, reasons and policy are the same either way.
 
 ## Client disconnects
 
@@ -191,7 +191,7 @@ An ASGI receive channel has exactly one useful reader — `receive()` is a queue
 
 Full reasoning in [Disconnect Delivery — Design Rationale](docs/disconnect-watcher-analysis.md) and [Architecture](docs/architecture.md#disconnect-delivery-replay-and-record).
 
-Requires `starlette` (installed with FastAPI) and `anyio>=4.11`, which Starlette already brings — `pip install aiofence[starlette]` or `aiofence[fastapi]`.
+Requires `starlette` (installed with FastAPI) — `pip install aiofence[starlette]` or `aiofence[fastapi]`.
 
 ## Documentation
 
@@ -203,13 +203,13 @@ Requires `starlette` (installed with FastAPI) and `anyio>=4.11`, which Starlette
 
 ## Caveats
 
-**Nested Fences are not supported.** Entering a `Fence` while another is active on the same task raises `RuntimeError`. Use sequential fences or `get_current_fencing()` composition instead. See [#12](https://github.com/stanislaushimovolos/aiofence/issues/12) for details and progress.
+**Nested Fences need the anyio backend**, which is the default. `NativeBackend` refuses a second `Fence` on the same task with `RuntimeError`; see [#12](https://github.com/stanislaushimovolos/aiofence/issues/12). Under anyio, scopes exit in strict LIFO order, so a fence must not span a `yield` in a generator.
 
 **The disconnect dependencies require `DisconnectMiddleware`** and raise `RuntimeError` without it. There is no fallback on purpose — see [Why this is the hard part](#why-this-is-the-hard-part) and [the API guide](docs/api.md#why-the-middleware-is-required).
 
 ## Requirements
 
-Python 3.12+. No dependencies.
+Python 3.12+ and `anyio>=4.11` (the version that added `CancelScope.cancel(reason)`). Starlette and httpx already bring anyio, so on the flagship stack it costs nothing.
 
 ## License
 
