@@ -10,16 +10,25 @@ from .abc import CancelBackend, CancelHandle
 
 class AnyioBackend(CancelBackend):
     """
-    Cancels through an `anyio.CancelScope` per fence.
+    Cancels through an `anyio.CancelScope` per fence. The default backend.
 
     anyio delivers the cancel only while the task is suspended on a pending
     future, retries every loop tick until the scope exits, and skips awaits
     inside a shielded child scope. Libraries written for anyio's model —
     httpx/httpcore, Starlette — therefore see the fence exactly as they see
     `anyio.fail_after`. See docs/architecture.md, "Cancel Backends".
+
+    Nested fences map onto nested scopes: anyio links them on its own
+    per-task stack, so an inner fence backs off whenever an outer one has
+    fired, and cleanup inside a cancelled outer is re-cancelled at every
+    await. Scopes must exit in the order they were entered, on the task
+    that entered them — a fence spanning a `yield` breaks that.
     """
 
     def enter(self, task: asyncio.Task[Any]) -> CancelHandle:
+        return _ScopeHandle(task)
+
+    def enter_nested(self, task: asyncio.Task[Any], parent: CancelHandle) -> CancelHandle:  # noqa: ARG002
         return _ScopeHandle(task)
 
 

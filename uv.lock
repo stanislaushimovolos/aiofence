@@ -5,17 +5,15 @@ requires-python = ">=3.12, <3.15"
 [[package]]
 name = "aiofence"
 source = { editable = "." }
-
-[package.optional-dependencies]
-anyio = [
+dependencies = [
     { name = "anyio" },
 ]
+
+[package.optional-dependencies]
 fastapi = [
-    { name = "anyio" },
     { name = "fastapi" },
 ]
 starlette = [
-    { name = "anyio" },
     { name = "starlette" },
 ]
 
@@ -36,9 +34,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anyio", marker = "extra == 'anyio'", specifier = ">=4.11" },
-    { name = "anyio", marker = "extra == 'fastapi'", specifier = ">=4.11" },
-    { name = "anyio", marker = "extra == 'starlette'", specifier = ">=4.11" },
+    { name = "anyio", specifier = ">=4.11" },
     { name = "fastapi", marker = "extra == 'fastapi'", specifier = ">=0.118" },
     { name = "starlette", marker = "extra == 'starlette'", specifier = ">=0.42" },
 ]

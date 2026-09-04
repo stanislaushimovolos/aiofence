@@ -8,7 +8,13 @@ from .api import (
     on_event,
     on_timeout,
 )
-from .backends import CancelBackend, NativeBackend, get_default_backend, set_default_backend
+from .backends import (
+    AnyioBackend,
+    CancelBackend,
+    NativeBackend,
+    get_default_backend,
+    set_default_backend,
+)
 from .core import (
     CancelPolicy,
     CancelReason,
@@ -25,6 +31,7 @@ from .triggers import (
 )
 
 __all__ = [
+    "AnyioBackend",
     "CancelBackend",
     "CancelPolicy",
     "CancelReason",

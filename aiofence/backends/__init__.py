@@ -3,9 +3,11 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 
 from .abc import CancelBackend, CancelHandle
+from .anyio import AnyioBackend
 from .native import NativeBackend
 
 __all__ = [
+    "AnyioBackend",
     "CancelBackend",
     "CancelHandle",
     "NativeBackend",
@@ -14,7 +16,7 @@ __all__ = [
     "set_default_backend",
 ]
 
-_default_backend: CancelBackend = NativeBackend()
+_default_backend: CancelBackend = AnyioBackend()
 _bound_backend: ContextVar[CancelBackend | None] = ContextVar("aiofence_backend", default=None)
 
 
@@ -22,10 +24,8 @@ def set_default_backend(backend: CancelBackend) -> None:
     """
     Choose the backend every Fence built without an explicit ``backend``
     uses from now on, unless a ``bind_backend`` context says otherwise.
-    Call once at startup; process-wide.
-
-    ``AnyioBackend`` lives in ``aiofence.backends.anyio`` and is not
-    imported here so the base package stays free of anyio.
+    Call once at startup; process-wide. ``AnyioBackend`` is the default;
+    ``NativeBackend`` opts a process back into asyncio's own ``task.cancel()``.
     """
     global _default_backend  # noqa: PLW0603
     _default_backend = backend

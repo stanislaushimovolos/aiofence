@@ -37,7 +37,7 @@ CancelPolicy = Callable[[CancelReason], bool]
 
 logger = logging.getLogger("aiofence")
 
-_active_fences: WeakKeyDictionary[asyncio.Task[Any], Fence] = WeakKeyDictionary()
+_active_fences: WeakKeyDictionary[asyncio.Task[Any], list[Fence]] = WeakKeyDictionary()
 
 
 class Trigger(ABC):
@@ -86,7 +86,8 @@ class Fence:
 
     `backend` decides how the cancel reaches the task. Defaults to the
     process-wide default (`aiofence.set_default_backend`), which is
-    `NativeBackend` — asyncio's own `cancel()`/`uncancel()` protocol.
+    `AnyioBackend`. A Fence entered while another is active on the same
+    task is nested: the inner fence's backend decides whether it can be.
     """
 
     def __init__(
@@ -154,15 +155,9 @@ class Fence:
                 "a worker thread (e.g. a FastAPI `def` handler)."
             )
 
-        if task in _active_fences:
-            raise RuntimeError(
-                "Nested Fences are not supported. "
-                "See https://github.com/stanislaushimovolos/aiofence/issues/12"
-            )
-
-        _active_fences[task] = self
+        self._handle = self._enter_backend(task, _active_fences.get(task))
         self._current_task = task
-        self._handle = self._backend.enter(task)
+        _active_fences.setdefault(task, []).append(self)
 
         for source in self._triggers:
             reason = source.check()
@@ -193,12 +188,17 @@ class Fence:
             return self._suppressed
         finally:
             if self._current_task is not None:
-                _active_fences.pop(self._current_task, None)
+                _leave_stack(self._current_task, self)
 
             # remove references to allow GC collect objects
             self._current_task = None
             self._handle = None
             self._exit_handlers = []
+
+    def _enter_backend(self, task: asyncio.Task[Any], stack: list[Fence] | None) -> CancelHandle:
+        if not stack:
+            return self._backend.enter(task)
+        return self._backend.enter_nested(task, stack[-1]._require_handle())
 
     def _on_trigger(self, reason: CancelReason) -> None:
         if not self._admit(reason) or self._cancel_sent:
@@ -246,3 +246,13 @@ class Fence:
         if self._handle is None:
             raise RuntimeError("Fence used before __enter__")
         return self._handle
+
+
+def _leave_stack(task: asyncio.Task[Any], fence: Fence) -> None:
+    stack = _active_fences.get(task)
+    if stack is None:
+        return
+
+    stack.remove(fence)
+    if not stack:
+        del _active_fences[task]
