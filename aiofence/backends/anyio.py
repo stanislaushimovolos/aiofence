@@ -22,13 +22,14 @@ class AnyioBackend(CancelBackend):
     per-task stack, so an inner fence backs off whenever an outer one has
     fired, and cleanup inside a cancelled outer is re-cancelled at every
     await. Scopes must exit in the order they were entered, on the task
-    that entered them — a fence spanning a `yield` breaks that.
+    that entered them — a fence spanning a `yield` breaks that. See
+    https://anyio.readthedocs.io/en/stable/cancellation.html#avoiding-cancel-scope-stack-corruption
     """
 
     def enter(self, task: asyncio.Task[Any]) -> CancelHandle:
         return _ScopeHandle(task)
 
-    def enter_nested(self, task: asyncio.Task[Any], parent: CancelHandle) -> CancelHandle:  # noqa: ARG002
+    def enter_nested(self, task: asyncio.Task[Any]) -> CancelHandle:
         return _ScopeHandle(task)
 
 
