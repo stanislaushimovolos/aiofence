@@ -82,7 +82,7 @@ Events are never merged — all arm independently. Registrations are deduplicate
 
 ### Guarding cancellation
 
-A trigger firing is not always a reason to cancel. A streaming proxy wants the client's disconnect to cancel the upstream read while the answer is still being generated, but once the finish reason has arrived it wants to keep draining — the trailing usage frame is what gets billed. Same trigger, different decision, depending on state only the fence's user knows at fire time.
+A trigger firing is not always a reason to cancel. A streaming proxy wants the client's disconnect to cancel the upstream read while the answer is still being generated, but once the finish reason has arrived it wants to keep draining — clients routinely hang up the moment they have the chunk they were waiting for, and the trailing usage frame that gets billed is still on the wire. Same trigger, different decision, depending on state only the fence's user knows at fire time.
 
 `.unless()` declines reasons while a precondition holds. Scope it to one code so the rest of the fence — typically the timeout — keeps cancelling:
 
@@ -283,13 +283,12 @@ with Fence(TimeoutTrigger(5), EventTrigger(shutdown, code="shutdown")) as fence:
 
 ### Cancel backend
 
-How a fence cancels its task is pluggable. The default, `NativeBackend`, is asyncio's own `task.cancel()`. `AnyioBackend` cancels through an `anyio.CancelScope` instead, so shields in anyio-based libraries (httpx, Starlette) hold and their cleanup completes:
+How a fence cancels its task is pluggable. The default, `AnyioBackend`, cancels through an `anyio.CancelScope` per fence: shields and locks in anyio-based libraries (httpx, Starlette) hold, their cleanup completes, and fences nest — an inner fence backs off when an outer one has fired. `NativeBackend` is asyncio's own `task.cancel()`, delivered exactly once, and refuses a second fence on the same task with `RuntimeError`:
 
 ```python
-from aiofence import set_default_backend
-from aiofence.backends.anyio import AnyioBackend  # needs aiofence[anyio]
+from aiofence import NativeBackend, set_default_backend
 
-set_default_backend(AnyioBackend())  # once, at startup
+set_default_backend(NativeBackend())  # once, at startup
 ```
 
 Every `Fence` built afterwards without an explicit `backend=` uses it, `Fencing`-built ones included. `Fence(backend=...)` overrides per fence. `aiofence.backends.bind_backend(backend)` is the scoped form: a context manager whose backend wins over the process default in the current task and in tasks it spawns — it is how [`DisconnectMiddleware` picks anyio per request](#which-backend-cancels). The trade-offs are in [architecture.md](architecture.md#cancel-backends).
@@ -623,7 +622,7 @@ That keeps the decision visible in the code that cares about it, and leaves ever
 
 #### Which backend cancels
 
-Under the middleware every fence — ambient, dependency-built, or a bare `Fence(...)` — cancels through `AnyioBackend` by default, for the request and the tasks it spawns. Starlette and httpx wrap their cleanup in anyio shields, and only a cancel delivered by anyio respects them; a native `task.cancel()` landing inside httpcore's connection close can cost the pool a slot for good ([why](architecture.md#cancel-backends)). Installing the middleware is therefore also opting into anyio delivery. The `backend` parameter is the way out, per app:
+Under the middleware every fence — ambient, dependency-built, or a bare `Fence(...)` — cancels through `AnyioBackend` by default, for the request and the tasks it spawns. Starlette runs the request inside anyio task groups and httpcore guards its connection state with anyio locks and shields; all are written to anyio's cancellation contract, and a native `task.cancel()` is a foreign signal to them — inside a cancelled task group it can be the fence's cancel that lands first and gets suppressed, leaving the body running, and inside httpcore it can land on a lock checkpoint and leave a connection stuck in a state the pool never sweeps, one slot lost for good ([why](architecture.md#cancel-backends)). Neither backend protects a *saturated* upstream-httpx pool from [httpcore#961](https://github.com/encode/httpcore/issues/961); see the README caveats. Installing the middleware is therefore also opting into anyio delivery. The `backend` parameter is the way out, per app:
 
 ```python
 from aiofence import NativeBackend
