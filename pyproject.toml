@@ -13,20 +13,21 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
 ]
-dependencies = []
+# anyio >= 4.11 is the first with CancelScope.cancel(reason), which
+# AnyioBackend — the default backend — uses to carry the fence's reason text
+# in the CancelledError.
+dependencies = ["anyio>=4.11"]
 
-# The core package stays dependency-free. These extras carry only the floors
-# `aiofence.contrib` needs: FastAPI >= 0.118 tears yield dependencies down
-# after the response (0.106-0.117 did it before, which unbinds the disconnect
-# fencing for the whole streaming phase), and Starlette >= 0.42 has the ASGI
-# spec_version gate in StreamingResponse. anyio >= 4.11 is the first with
-# CancelScope.cancel(reason), which AnyioBackend uses to carry the fence's
-# reason text in the CancelledError.
+# The extras carry only the floors `aiofence.contrib` needs: FastAPI >= 0.118
+# tears yield dependencies down after the response (0.106-0.117 did it before,
+# which unbinds the disconnect fencing for the whole streaming phase), and
+# Starlette >= 0.42 has the ASGI spec_version gate in StreamingResponse.
+# `anyio` is kept as an empty extra so existing installs keep resolving.
 # See docs/disconnect-watcher-analysis.md.
 [project.optional-dependencies]
-anyio = ["anyio>=4.11"]
-fastapi = ["fastapi>=0.118", "anyio>=4.11"]
-starlette = ["starlette>=0.42", "anyio>=4.11"]
+anyio = []
+fastapi = ["fastapi>=0.118"]
+starlette = ["starlette>=0.42"]
 
 [project.urls]
 Repository = "https://github.com/stanislaushimovolos/aiofence"

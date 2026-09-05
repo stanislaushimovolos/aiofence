@@ -11,10 +11,22 @@ class NativeBackend(CancelBackend):
     Cancels through asyncio's own protocol: one `task.cancel()`, balanced
     by one `uncancel()` on exit, with ownership settled by the
     `task.cancelling()` counter snapshot taken on entry.
+
+    Nested fences on one task are refused: with a single counter there is
+    no way to tell which of two fences a cancel belongs to.
     """
 
     def enter(self, task: asyncio.Task[Any]) -> CancelHandle:
         return _NativeHandle(task, task.cancelling())
+
+    def enter_nested(self, task: asyncio.Task[Any]) -> CancelHandle:  # noqa: ARG002
+        message = (
+            f"{type(self).__name__} does not support nested Fences on one task. "
+            "Nest under AnyioBackend — the default — or bind it for this context with "
+            "`bind_backend(AnyioBackend())`. "
+            "See https://github.com/stanislaushimovolos/aiofence/issues/12"
+        )
+        raise RuntimeError(message)
 
 
 class _NativeHandle(CancelHandle):

@@ -26,7 +26,15 @@ class CancelBackend(ABC):
     """
     Decides *how* a fence cancels its task. Triggers, policy and reasons
     are the fence's; the backend only owns delivery and ownership.
+
+    `enter(task)` — the task's outermost fence. `enter_nested(task)` — a
+    fence entered while another is still active on the same task. A backend
+    that cannot settle ownership between the two raises `RuntimeError`
+    there instead of returning a handle.
     """
 
     @abstractmethod
     def enter(self, task: asyncio.Task[Any]) -> CancelHandle: ...
+
+    @abstractmethod
+    def enter_nested(self, task: asyncio.Task[Any]) -> CancelHandle: ...

@@ -4,17 +4,7 @@ import pytest
 
 from aiofence import EventTrigger, Fence, TimeoutTrigger
 
-# --- Nested fences (blocked until #11 is resolved) ---
-
-
-async def test__fence__when_nested__then_raises_runtime_error():
-    outer = Fence(TimeoutTrigger(10))
-    inner = Fence(TimeoutTrigger(0.001))
-
-    with outer:
-        with pytest.raises(RuntimeError, match="Nested Fences are not supported"):
-            with inner:
-                await asyncio.sleep(1)
+# --- Sequential fences ---
 
 
 async def test__fence__when_sequential__then_allowed():

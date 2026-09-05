@@ -23,6 +23,9 @@ class RecordingBackend(CancelBackend):
         self.calls.append(("enter", task))
         return RecordingHandle(self._inner.enter(task), self.calls)
 
+    def enter_nested(self, task: asyncio.Task[Any]) -> CancelHandle:
+        return self._inner.enter_nested(task)
+
 
 class RecordingHandle(CancelHandle):
     def __init__(self, inner: CancelHandle, calls: list[tuple[str, Any]]) -> None:
@@ -49,6 +52,9 @@ class SuppressingHandle(CancelHandle):
 
 class SuppressingBackend(CancelBackend):
     def enter(self, *_args: object) -> CancelHandle:
+        return SuppressingHandle()
+
+    def enter_nested(self, *_args: object) -> CancelHandle:
         return SuppressingHandle()
 
 
@@ -243,3 +249,92 @@ async def test__fence__when_explicit_backend_given_under_bind__then_explicit_win
         fence = Fence(backend=explicit)
 
     assert fence._backend is explicit
+
+
+# --- Nesting ---
+
+
+class NestingRecordingBackend(RecordingBackend):
+    def enter_nested(self, task: asyncio.Task[Any]) -> CancelHandle:
+        self.calls.append(("enter_nested", task))
+        return RecordingHandle(self._inner.enter(task), self.calls)
+
+
+@pytest.fixture(scope="session")
+def untouched_default_backend() -> CancelBackend:
+    return get_default_backend()
+
+
+def test__default_backend__when_untouched__then_anyio(
+    untouched_default_backend: CancelBackend,
+) -> None:
+    assert isinstance(untouched_default_backend, AnyioBackend)
+
+
+def test__cancel_backend__when_enter_nested_not_implemented__then_cannot_instantiate() -> None:
+    class EnterOnlyBackend(CancelBackend):
+        def enter(self, *_args: object) -> CancelHandle:
+            return SuppressingHandle()
+
+    with pytest.raises(TypeError, match="enter_nested"):
+        EnterOnlyBackend()  # type: ignore[abstract]
+
+
+async def test__native_backend__when_nested__then_raises_naming_backend() -> None:
+    class SubclassedNative(NativeBackend):
+        pass
+
+    with Fence(backend=SubclassedNative()):
+        with pytest.raises(RuntimeError, match="SubclassedNative does not support nested Fences"):
+            with Fence(backend=SubclassedNative()):
+                pass
+
+
+async def test__fence__when_nested__then_inner_backend_enters_nested(
+    backend: RecordingBackend,
+) -> None:
+    nesting = NestingRecordingBackend()
+
+    with Fence(backend=backend):
+        with Fence(backend=nesting):
+            await asyncio.sleep(0)
+
+    assert nesting.calls[0] == ("enter_nested", asyncio.current_task())
+
+
+async def test__fence__when_nested_entry_refused__then_outer_stack_unchanged() -> None:
+    with Fence(TimeoutTrigger(0), backend=AnyioBackend()) as outer:
+        with (
+            pytest.raises(RuntimeError, match="does not support nested"),
+            Fence(backend=NativeBackend()),
+        ):
+            pass
+        await asyncio.sleep(10)
+
+    assert outer.suppressed
+
+
+async def test__fence__when_native_outer_and_anyio_inner__then_inner_nests() -> None:
+    with Fence(TimeoutTrigger(10), backend=NativeBackend()) as outer:
+        with Fence(TimeoutTrigger(0), backend=AnyioBackend()) as inner:
+            await asyncio.sleep(10)
+        await asyncio.sleep(0)
+
+    assert inner.suppressed
+    assert not outer.cancelled
+
+
+async def test__fence__when_native_outer_and_anyio_inner_share_trigger__then_outer_suppresses() -> (
+    None
+):
+    shutdown = asyncio.Event()
+
+    with Fence(EventTrigger(shutdown), backend=NativeBackend()) as outer:
+        with Fence(EventTrigger(shutdown), backend=AnyioBackend()) as inner:
+            shutdown.set()
+            await asyncio.sleep(10)
+
+    assert inner.cancelled
+
+    assert not inner.suppressed
+    assert outer.suppressed

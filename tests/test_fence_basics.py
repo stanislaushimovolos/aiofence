@@ -66,5 +66,33 @@ async def test__fence__when_body_raises__then_exception_propagates():
 
 async def test__fence__cancel_before_enter__then_raises():
     fence = Fence()
-    with pytest.raises(RuntimeError, match="before __enter__"):
+    with pytest.raises(RuntimeError, match="not entered"):
         fence._cancel()
+
+
+async def test__fence_task__when_not_entered__then_raises():
+    fence = Fence()
+    with pytest.raises(RuntimeError, match="not entered"):
+        _ = fence.task
+
+
+async def test__fence_handle__when_not_entered__then_raises():
+    fence = Fence()
+    with pytest.raises(RuntimeError, match="not entered"):
+        _ = fence.handle
+
+
+async def test__fence_task_and_handle__when_entered__then_current_task_and_backend_handle():
+    with Fence() as fence:
+        assert fence.task is asyncio.current_task()
+        assert fence.handle is fence._handle
+
+
+async def test__fence_task_and_handle__when_exited__then_raise():
+    with Fence() as fence:
+        pass
+
+    with pytest.raises(RuntimeError, match="not entered"):
+        _ = fence.task
+    with pytest.raises(RuntimeError, match="not entered"):
+        _ = fence.handle
