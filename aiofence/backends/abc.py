@@ -24,8 +24,8 @@ class CancelHandle(ABC):
 
 class CancelBackend(ABC):
     """
-    Decides *how* a fence cancels its task. Triggers, policy and reasons
-    are the fence's; the backend only owns delivery and ownership.
+    Decides *how* a fence cancels its task. Deadline, events, policy and
+    reasons are the fence's; the backend only owns delivery and ownership.
 
     `enter(task)` — the task's outermost fence. `enter_nested(task)` — a
     fence entered while another is still active on the same task. A backend

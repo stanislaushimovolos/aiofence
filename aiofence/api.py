@@ -7,8 +7,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
-from .core import CancelPolicy, CancelReason, Fence, Trigger
-from .triggers import EventTrigger, TimeoutTrigger
+from .core import CancelPolicy, CancelReason, Fence
 
 _current_fencing: ContextVar[Fencing | None] = ContextVar("current_fencing", default=None)
 
@@ -23,13 +22,15 @@ class _EventEntry:
 
 class FenceCancelled(Exception):  # noqa: N818
     """
-    Raised by ``Fencing.raise_on_cancel()`` when a trigger fires.
+    Raised by ``Fencing.raise_on_cancel()`` when the fence cancelled.
 
     Attributes:
         suppressed: True if the Fence caught and suppressed a
-            CancelledError. False if a trigger fired but the body
+            CancelledError. False if something fired but the body
             completed before cancellation was delivered.
-        cancel_reasons: All trigger reasons that fired.
+        cancel_reasons: Reasons of the fence's own deadline or events.
+            Never an external one: an external cancel propagates as
+            CancelledError and this exception is not raised.
         declined_reasons: Reasons the fence's policy rejected; they never
             cancelled anything.
     """
@@ -130,7 +131,7 @@ class Fencing:
         reported independently by ``fence.cancelled_by(code)``.
 
         Args:
-            event: asyncio.Event that triggers cancellation when set.
+            event: asyncio.Event that cancels when set.
             code: Machine-readable identifier for programmatic matching
                   via ``fence.cancelled_by(code)``.
         """
@@ -211,14 +212,12 @@ class Fencing:
             yield fence
 
     def _build_fence(self) -> Fence:
-        triggers: list[Trigger] = []
-        if self._deadline is not None:
-            loop = asyncio.get_running_loop()
-            remaining = max(0.0, self._deadline - loop.time())
-            triggers.append(TimeoutTrigger(delay=remaining, code=self._deadline_code))
-
-        triggers.extend(EventTrigger(event=e.event, code=e.code) for e in self._events)
-        return Fence(*triggers, policy=self._policy)
+        return Fence(
+            deadline=self._deadline,
+            deadline_code=self._deadline_code,
+            events=[(e.event, e.code) for e in self._events],
+            policy=self._policy,
+        )
 
     def _derive(
         self,
@@ -271,7 +270,7 @@ def on_event(event: asyncio.Event, *, code: str | None = None) -> Fencing:
     Create a Fencing with an event-based cancellation condition.
 
     Args:
-        event: asyncio.Event that triggers cancellation when set.
+        event: asyncio.Event that cancels when set.
         code: Machine-readable identifier for programmatic matching
               via ``fence.cancelled_by(code)``.
     """

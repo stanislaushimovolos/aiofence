@@ -222,7 +222,7 @@ class _RequestChannel:
 
     def _end_channel(self, *, client_left: bool) -> None:
         self._channel_ended = True
-        # Set before waking: this queues a fence's trigger callback ahead of the
+        # Set before waking: this queues a fence's event callback ahead of the
         # parked reader's wakeup, so a fence around that read is cancelled rather
         # than handed the reply Starlette turns into ClientDisconnect. A fence
         # entered after this point gets the exception — its cancel is only

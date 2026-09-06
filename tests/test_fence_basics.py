@@ -2,7 +2,8 @@ import asyncio
 
 import pytest
 
-from aiofence import Fence, TimeoutTrigger
+from aiofence import Fence
+from tests.helpers import deadline_in
 
 
 async def test__fence__when_no_sources_async__then_protocol_intact():
@@ -25,7 +26,7 @@ async def test__fence__when_zero_timeout__then_body_interrupted_at_await():
     reached_before_await = False
     reached_after_await = False
 
-    with Fence(TimeoutTrigger(0)) as fence:
+    with Fence(deadline=deadline_in(0)) as fence:
         reached_before_await = True
         await asyncio.sleep(0)
         reached_after_await = True
@@ -39,7 +40,7 @@ async def test__fence__when_zero_timeout__then_body_interrupted_at_await():
 async def test__fence__when_zero_timeout_sync_body__then_body_completes():
     reached = False
 
-    with Fence(TimeoutTrigger(0)) as fence:
+    with Fence(deadline=deadline_in(0)) as fence:
         reached = True
 
     assert not fence.suppressed

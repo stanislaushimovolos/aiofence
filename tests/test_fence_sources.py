@@ -2,14 +2,14 @@ import asyncio
 
 import pytest
 
-from aiofence import EventTrigger, Fence, TimeoutTrigger
-from aiofence.core import CancelCallback, CancelReason, CancelType, Trigger, TriggerHandle
+from aiofence import CancelType, Fence
+from tests.helpers import deadline_in
 
 # --- Pre-triggered ---
 
 
 async def test__fence__when_timeout_pre_triggered__then_suppressed_with_reasons():
-    with Fence(TimeoutTrigger(0)) as fence:
+    with Fence(deadline=deadline_in(0)) as fence:
         await asyncio.sleep(1)
 
     assert fence.suppressed
@@ -22,7 +22,7 @@ async def test__fence__when_event_pre_set__then_suppressed_and_cancelled():
     event = asyncio.Event()
     event.set()
 
-    with Fence(EventTrigger(event)) as fence:
+    with Fence(events=[(event, None)]) as fence:
         await asyncio.sleep(1)
 
     assert fence.suppressed
@@ -36,7 +36,7 @@ async def test__fence__when_event_pre_set__then_body_interrupted_at_await():
     reached_before_await = False
     reached_after_await = False
 
-    with Fence(EventTrigger(event)) as fence:
+    with Fence(events=[(event, None)]) as fence:
         reached_before_await = True
         await asyncio.sleep(0)
         reached_after_await = True
@@ -52,7 +52,7 @@ async def test__fence__when_event_pre_set_sync_body__then_body_completes():
     event.set()
     reached = False
 
-    with Fence(EventTrigger(event)) as fence:
+    with Fence(events=[(event, None)]) as fence:
         reached = True
 
     assert not fence.suppressed
@@ -64,7 +64,7 @@ async def test__fence__when_pretriggered_sync_body__then_not_cancelled_but_trigg
     event = asyncio.Event()
     event.set()
 
-    with Fence(EventTrigger(event)) as fence:
+    with Fence(events=[(event, None)]) as fence:
         result = "real_result"
 
     if fence.suppressed:
@@ -78,7 +78,7 @@ async def test__fence__when_pretriggered_sync_body__then_cancelled_by_still_work
     event = asyncio.Event()
     event.set()
 
-    with Fence(EventTrigger(event, code="shutdown")) as fence:
+    with Fence(events=[(event, "shutdown")]) as fence:
         x = 1 + 1  # noqa: F841
 
     assert fence.suppressed is False
@@ -87,7 +87,7 @@ async def test__fence__when_pretriggered_sync_body__then_cancelled_by_still_work
 
 
 async def test__fence__when_zero_timeout_sync_body__then_not_cancelled_but_triggered():
-    with Fence(TimeoutTrigger(0)) as fence:
+    with Fence(deadline=deadline_in(0)) as fence:
         x = 1 + 1  # noqa: F841
 
     assert fence.suppressed is False
@@ -96,7 +96,7 @@ async def test__fence__when_zero_timeout_sync_body__then_not_cancelled_but_trigg
 
 
 async def test__fence__when_timeout_fires__then_both_cancelled_and_triggered():
-    with Fence(TimeoutTrigger(0.01)) as fence:
+    with Fence(deadline=deadline_in(0.01)) as fence:
         await asyncio.sleep(10)
 
     assert fence.suppressed is True
@@ -112,14 +112,14 @@ async def test__fence__when_no_trigger__then_neither_cancelled_nor_triggered():
     assert fence.cancel_reasons == ()
 
 
-# --- Runtime trigger fire (not pre-set) ---
+# --- Fires during the body (not pre-set) ---
 
 
 async def test__fence__when_event_set_during_body__then_suppressed():
     event = asyncio.Event()
     asyncio.get_running_loop().call_soon(event.set)
 
-    with Fence(EventTrigger(event)) as fence:
+    with Fence(events=[(event, None)]) as fence:
         await asyncio.sleep(1)
 
     assert fence.suppressed
@@ -127,7 +127,7 @@ async def test__fence__when_event_set_during_body__then_suppressed():
 
 
 async def test__fence__when_timeout_fires__then_suppressed_with_reasons():
-    with Fence(TimeoutTrigger(0.001)) as fence:
+    with Fence(deadline=deadline_in(0.001)) as fence:
         await asyncio.sleep(1)
 
     assert fence.suppressed
@@ -139,7 +139,7 @@ async def test__fence__when_timeout_fires__then_suppressed_with_reasons():
 async def test__fence__when_body_catches_cancelled_error__then_counter_balanced():
     task = asyncio.current_task()
 
-    with Fence(TimeoutTrigger(0.001)) as fence:
+    with Fence(deadline=deadline_in(0.001)) as fence:
         try:
             await asyncio.sleep(1)
         except asyncio.CancelledError:
@@ -154,7 +154,7 @@ async def test__fence__when_trigger_fires_and_body_raises__then_exception_propag
     task = asyncio.current_task()
 
     with pytest.raises(ValueError, match="boom"):
-        with Fence(TimeoutTrigger(0.001)) as fence:
+        with Fence(deadline=deadline_in(0.001)) as fence:
             try:
                 await asyncio.sleep(1)
             except asyncio.CancelledError:
@@ -169,7 +169,7 @@ async def test__fence__when_trigger_fires_and_finally_raises__then_exception_pro
     task = asyncio.current_task()
 
     with pytest.raises(ValueError, match="boom"):
-        with Fence(TimeoutTrigger(0.001)) as fence:
+        with Fence(deadline=deadline_in(0.001)) as fence:
             try:
                 await asyncio.sleep(1)
             finally:
@@ -183,7 +183,7 @@ async def test__fence__when_trigger_fires_and_finally_raises__then_exception_pro
 async def test__fence__when_user_uncancels_inside_body__then_counter_balanced():
     task = asyncio.current_task()
 
-    with Fence(TimeoutTrigger(0.001)) as fence:
+    with Fence(deadline=deadline_in(0.001)) as fence:
         try:
             await asyncio.sleep(1)
         except asyncio.CancelledError:
@@ -198,7 +198,7 @@ async def test__fence__when_user_uncancels_inside_body__then_counter_balanced():
 
 
 async def test__fence__when_negative_timeout__then_suppressed():
-    with Fence(TimeoutTrigger(-1)) as fence:
+    with Fence(deadline=deadline_in(-1)) as fence:
         await asyncio.sleep(1)
 
     assert fence.suppressed
@@ -206,21 +206,11 @@ async def test__fence__when_negative_timeout__then_suppressed():
     assert fence.cancel_reasons[0].cancel_type is CancelType.TIMEOUT
 
 
-async def test__fence__when_disarm_after_trigger_fired__then_no_crash():
-    event = asyncio.Event()
-    trigger = EventTrigger(event)
-
-    handle = trigger.arm(lambda reason: None)
-    event.set()
-    await asyncio.sleep(0)  # let the future resolve
-    handle.disarm()  # should not crash
-
-
 async def test__fence__when_event_set_inside_body__then_body_interrupted_at_await():
     event = asyncio.Event()
     reached = False
 
-    with Fence(EventTrigger(event)) as fence:
+    with Fence(events=[(event, None)]) as fence:
         event.set()
         await asyncio.sleep(0)
         reached = True
@@ -233,7 +223,7 @@ async def test__fence__when_event_set_inside_body__then_body_interrupted_at_awai
 async def test__fence__when_event_set_inside_body__then_no_spurious_cancel_after_exit():
     event = asyncio.Event()
 
-    with Fence(EventTrigger(event)) as fence:
+    with Fence(events=[(event, None)]) as fence:
         event.set()
         await asyncio.sleep(0)  # let callback fire
 
@@ -247,7 +237,7 @@ async def test__fence__when_event_has_code__then_reason_carries_code():
     event = asyncio.Event()
     asyncio.get_running_loop().call_soon(event.set)
 
-    with Fence(EventTrigger(event, code="shutdown")) as fence:
+    with Fence(events=[(event, "shutdown")]) as fence:
         await asyncio.sleep(1)
 
     assert fence.suppressed
@@ -256,7 +246,7 @@ async def test__fence__when_event_has_code__then_reason_carries_code():
 
 
 async def test__fence__when_timeout_has_code__then_reason_carries_code():
-    with Fence(TimeoutTrigger(0, code="request_budget")) as fence:
+    with Fence(deadline=deadline_in(0), deadline_code="request_budget") as fence:
         await asyncio.sleep(1)
 
     assert fence.suppressed
@@ -265,7 +255,7 @@ async def test__fence__when_timeout_has_code__then_reason_carries_code():
 
 
 async def test__fence__when_no_code__then_reason_code_is_none():
-    with Fence(TimeoutTrigger(0)) as fence:
+    with Fence(deadline=deadline_in(0)) as fence:
         await asyncio.sleep(1)
 
     assert fence.suppressed
@@ -277,7 +267,7 @@ async def test__fence__cancelled_by__when_code_matches__then_true():
     event = asyncio.Event()
     asyncio.get_running_loop().call_soon(event.set)
 
-    with Fence(EventTrigger(event, code="disconnect")) as fence:
+    with Fence(events=[(event, "disconnect")]) as fence:
         await asyncio.sleep(1)
 
     assert fence.cancelled_by("disconnect")
@@ -288,9 +278,7 @@ async def test__fence__cancelled_by__when_multiple_triggers__then_matches_any():
     event1 = asyncio.Event()
     event2 = asyncio.Event()
 
-    with Fence(
-        EventTrigger(event1, code="shutdown"), EventTrigger(event2, code="disconnect")
-    ) as fence:
+    with Fence(events=[(event1, "shutdown"), (event2, "disconnect")]) as fence:
         event1.set()
         event2.set()
         await asyncio.sleep(1)
@@ -311,7 +299,7 @@ async def test__fence__when_multiple_triggers_fire__then_all_reasons_recorded():
     event1 = asyncio.Event()
     event2 = asyncio.Event()
 
-    with Fence(EventTrigger(event1), EventTrigger(event2)) as fence:
+    with Fence(events=[(event1, None), (event2, None)]) as fence:
         event1.set()
         event2.set()
         await asyncio.sleep(1)
@@ -319,24 +307,6 @@ async def test__fence__when_multiple_triggers_fire__then_all_reasons_recorded():
     assert fence.suppressed
     assert fence.cancelled
     assert len(fence.cancel_reasons) == 2
-
-
-async def test__fence__when_trigger_fires_inline__then_raises_invalid_state():
-    class InlineTrigger(Trigger):
-        def check(self) -> CancelReason | None:
-            return None
-
-        def arm(self, on_cancel: CancelCallback) -> TriggerHandle:
-            on_cancel(CancelReason(message="inline", cancel_type=CancelType.EVENT))
-            return _NoopHandle()
-
-    class _NoopHandle(TriggerHandle):
-        def disarm(self) -> None:
-            pass
-
-    with pytest.raises(asyncio.InvalidStateError, match="synchronously inside the task"):
-        with Fence(InlineTrigger()):
-            await asyncio.sleep(0)
 
 
 @pytest.mark.backend("native")  # anyio re-cancels every await inside the fence
@@ -351,7 +321,7 @@ async def test__fence__when_second_trigger_fires_during_cleanup__then_both_reaso
 
     bg_task = asyncio.create_task(set_event2_later())  # noqa: RUF006, F841
 
-    with Fence(EventTrigger(event1), EventTrigger(event2)) as fence:
+    with Fence(events=[(event1, None), (event2, None)]) as fence:
         event1.set()
         try:
             await asyncio.sleep(1)
@@ -377,7 +347,7 @@ async def test__fence__when_second_trigger_fires_after_fence__then_post_fence_as
 
     bg_task = asyncio.create_task(set_event2_later())  # noqa: RUF006, F841
 
-    with Fence(EventTrigger(event1), EventTrigger(event2)) as fence:
+    with Fence(events=[(event1, None), (event2, None)]) as fence:
         event1.set()
         try:
             await asyncio.sleep(1)
@@ -406,7 +376,7 @@ async def test__fence__when_event_reused_sequentially__then_waiters_clean():
 
     assert pending_waiters() == 1
 
-    with Fence(EventTrigger(event)) as fence1:
+    with Fence(events=[(event, None)]) as fence1:
         assert pending_waiters() == 2
         event.set()
         await asyncio.sleep(1)
@@ -422,7 +392,7 @@ async def test__fence__when_event_reused_sequentially__then_waiters_clean():
 
     assert pending_waiters() == 1
 
-    with Fence(EventTrigger(event)) as fence2:
+    with Fence(events=[(event, None)]) as fence2:
         assert pending_waiters() == 2
         event.set()
         await asyncio.sleep(1)
@@ -438,7 +408,7 @@ async def test__fence__when_two_tasks_share_event__then_both_cancelled_and_waite
     event = asyncio.Event()
 
     async def worker() -> Fence:
-        with Fence(EventTrigger(event)) as fence:
+        with Fence(events=[(event, None)]) as fence:
             await asyncio.sleep(10)
         return fence
 
