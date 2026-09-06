@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from aiofence import EventTrigger, Fence, TimeoutTrigger
+from aiofence import EXTERNAL_CODE, EventTrigger, Fence, TimeoutTrigger
 
 # --- Fence inside TaskGroup body ---
 
@@ -112,31 +112,39 @@ async def test__fence__when_child_fails_while_body_fenced__then_yields_to_tg():
     assert was_suppressed is None  # never reached
 
 
-async def test__fence__when_trigger_fires_during_tg_teardown__then_yields_to_tg():
+async def _trigger_fires_during_tg_teardown() -> Fence:
     cancel_event = asyncio.Event()
-    fence_suppressed = None
-    fence_cancelled = None
+    fence = Fence(EventTrigger(cancel_event))
 
     async def failing_child():
         await asyncio.sleep(0.01)
-        cancel_event.set()  # fires Fence's trigger
+        cancel_event.set()  # fires Fence's trigger in the same tick the TG cancels us
         raise ValueError("boom")
 
     with pytest.raises(ExceptionGroup) as exc_info:
         async with asyncio.TaskGroup() as tg:
             tg.create_task(failing_child())
-
-            fence = Fence(EventTrigger(cancel_event))
-            try:
-                with fence:
-                    await asyncio.sleep(10)
-            finally:
-                fence_suppressed = fence.suppressed
-                fence_cancelled = fence.cancelled
+            with fence:
+                await asyncio.sleep(10)
 
     assert exc_info.group_contains(ValueError)
-    assert fence_suppressed is False  # trigger fired, but Fence yielded to TG (not suppressed)
-    assert fence_cancelled is True
+    return fence
+
+
+@pytest.mark.backend("native")
+async def test__fence__when_trigger_fires_during_tg_teardown__then_yields_to_tg():
+    fence = await _trigger_fires_during_tg_teardown()
+
+    assert fence.suppressed is False  # counter says the TG's cancel is outstanding
+    assert fence.cancelled is True
+
+
+@pytest.mark.backend("anyio")
+async def test__fence__when_trigger_fires_during_tg_teardown__then_suppresses():
+    fence = await _trigger_fires_during_tg_teardown()
+
+    assert fence.suppressed is True  # anyio sees only its own cancel; the TG's is absorbed
+    assert not fence.cancelled_by(EXTERNAL_CODE)
 
 
 async def test__fence__when_outer_fence_wraps_tg_with_inner_fence__then_independent():
@@ -242,7 +250,7 @@ async def test__fence__when_tg_externally_cancelled_with_body_fenced__then_propa
                     await asyncio.sleep(10)
         finally:
             fence_suppressed = fence.suppressed
-            fence_cancelled = fence.cancelled
+            fence_cancelled = fence.cancelled_by(EXTERNAL_CODE)
 
     task = asyncio.get_running_loop().create_task(body())
     await asyncio.sleep(0.01)
@@ -254,7 +262,7 @@ async def test__fence__when_tg_externally_cancelled_with_body_fenced__then_propa
     assert task.cancelled()
     assert child_was_cancelled is True  # TG cancelled its child during teardown
     assert fence_suppressed is False  # Fence's trigger never fired
-    assert fence_cancelled is False
+    assert fence_cancelled is True
 
 
 # --- Simultaneous: Fence trigger + child failure ---

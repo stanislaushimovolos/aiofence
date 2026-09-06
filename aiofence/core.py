@@ -15,6 +15,7 @@ from .backends import CancelBackend, CancelHandle, get_default_backend
 class CancelType(Enum):
     EVENT = auto()
     TIMEOUT = auto()
+    EXTERNAL = auto()
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -25,11 +26,20 @@ class CancelReason:
 
     # Human-readable description, e.g. "timed out after 5s"
     message: str
-    # Category of cancellation (TIMEOUT or EVENT).
+    # Category of cancellation (TIMEOUT, EVENT, or EXTERNAL).
     cancel_type: CancelType
     # Optional machine-readable identifier for programmatic matching.
     # Set via trigger's `code` param. Works with StrEnum for type safety.
+    # A cancel the fence did not deliver is recorded under `EXTERNAL_CODE`.
     code: str | None = None
+
+
+EXTERNAL_CODE = "external"
+_EXTERNAL_REASON = CancelReason(
+    message="cancelled from outside the fence",
+    cancel_type=CancelType.EXTERNAL,
+    code=EXTERNAL_CODE,
+)
 
 
 CancelCallback = Callable[[CancelReason], None]
@@ -72,15 +82,21 @@ class Fence:
     Sync context manager that arms triggers against the current task.
 
     Suppression semantics (follows anyio CancelScope model):
-    __exit__ always suppresses CancelledError — never raises, never
-    propagates. Caller inspects `fence.suppressed` / `fence.cancel_reasons` after
-    the block. This keeps the cancel counter balanced and avoids
-    CancelledError-with-counter-zero, which would confuse TaskGroup
-    and nested asyncio.timeout scopes.
+    __exit__ suppresses the CancelledError its own trigger caused — never
+    raises, never propagates it. Caller inspects `fence.suppressed` /
+    `fence.cancel_reasons` after the block. This keeps the cancel counter
+    balanced and avoids CancelledError-with-counter-zero, which would
+    confuse TaskGroup and nested asyncio.timeout scopes.
 
     `policy` is consulted once per reason before the cancel is delivered.
     A reason it rejects is recorded in `declined_reasons` and does not
     cancel; a policy that raises is logged and treated as accepting.
+
+    A `CancelledError` that leaves the body and is not the fence's own —
+    an outer scope, an `asyncio.timeout()`, a `task.cancel()` from
+    elsewhere — propagates as it always has, and is recorded as a
+    `CancelType.EXTERNAL` reason under `EXTERNAL_CODE`. The policy is not
+    consulted: it is not ours to decline.
 
     `backend` decides how the cancel reaches the task. Defaults to the
     process-wide default (`aiofence.set_default_backend`). A Fence entered
@@ -140,7 +156,8 @@ class Fence:
     def cancelled(self) -> bool:
         """
         True if any trigger fired, even if the body completed
-        before cancellation was delivered.
+        before cancellation was delivered, or if a cancel from outside
+        the fence tore the body down (`cancelled_by(EXTERNAL_CODE)`).
         """
         return len(self._cancel_reasons) > 0
 
@@ -206,6 +223,8 @@ class Fence:
 
         try:
             self._suppressed = self.handle.exit(exc_type, exc_val)
+            if _is_cancelled(exc_val) and not self._suppressed:
+                self._cancel_reasons.append(_EXTERNAL_REASON)
             return self._suppressed
         finally:
             _active_fences.pop(self)
@@ -256,6 +275,14 @@ class Fence:
         """
         self._cancel_sent = True
         self.handle.cancel(self._cancel_reasons[0].message)
+
+
+def _is_cancelled(exc: BaseException | None) -> bool:
+    if isinstance(exc, asyncio.CancelledError):
+        return True
+    if isinstance(exc, BaseExceptionGroup):
+        return exc.subgroup(asyncio.CancelledError) is not None
+    return False
 
 
 class _ActiveFences:

@@ -29,7 +29,9 @@ class FenceCancelled(Exception):  # noqa: N818
         suppressed: True if the Fence caught and suppressed a
             CancelledError. False if a trigger fired but the body
             completed before cancellation was delivered.
-        cancel_reasons: All trigger reasons that fired.
+        cancel_reasons: Reasons of the fence's own triggers that fired.
+            Never an external one: an external cancel propagates as
+            CancelledError and this exception is not raised.
         declined_reasons: Reasons the fence's policy rejected; they never
             cancelled anything.
     """

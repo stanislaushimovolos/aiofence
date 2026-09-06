@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from aiofence import EventTrigger, Fence, TimeoutTrigger
+from aiofence import EXTERNAL_CODE, EventTrigger, Fence, TimeoutTrigger
 
 # --- Sequential fences ---
 
@@ -100,7 +100,7 @@ async def test__fence__when_external_cancel_with_fence__then_propagates():
             reached_after_fence = True
         finally:
             fence_suppressed = fence.suppressed
-            fence_cancelled = fence.cancelled
+            fence_cancelled = fence.cancelled_by(EXTERNAL_CODE)
 
     task = asyncio.get_running_loop().create_task(task_body())
     await asyncio.sleep(0)
@@ -111,7 +111,7 @@ async def test__fence__when_external_cancel_with_fence__then_propagates():
 
     assert not reached_after_fence
     assert not fence_suppressed
-    assert not fence_cancelled
+    assert fence_cancelled
     assert task.cancelled()
     assert task.cancelling() == 1
 
@@ -138,7 +138,7 @@ async def test__fence__when_cancel_called_inside_body__then_propagates():
     assert inner.cancelled()
 
 
-async def test__fence__when_child_task_cancelled_inside_body__then_fence_unaffected():
+async def test__fence__when_child_task_cancelled_inside_body__then_external_not_suppressed():
     event = asyncio.Event()  # never fires
     task = asyncio.current_task()
 
@@ -150,7 +150,7 @@ async def test__fence__when_child_task_cancelled_inside_body__then_fence_unaffec
             await child
 
     assert not fence.suppressed
-    assert not fence.cancelled
+    assert fence.cancelled_by(EXTERNAL_CODE)
     assert task.cancelling() == 0
 
 

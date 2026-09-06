@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from aiofence import EventTrigger, Fence, FenceCancelled, Fencing, TimeoutTrigger
+from aiofence import EXTERNAL_CODE, EventTrigger, Fence, FenceCancelled, Fencing, TimeoutTrigger
 
 pytestmark = pytest.mark.backend("anyio")
 
@@ -103,7 +103,7 @@ async def test__nested_fence__when_external_and_inner_trigger__then_external_pro
     assert not fence_suppressed
 
 
-async def test__nested_fence__when_external_cancel_no_triggers__then_clean_propagation():
+async def test__nested_fence__when_external_cancel_no_triggers__then_both_record_external():
     fence_inner_cancelled = None
     fence_outer_cancelled = None
 
@@ -115,8 +115,8 @@ async def test__nested_fence__when_external_cancel_no_triggers__then_clean_propa
                 with Fence(TimeoutTrigger(10)) as inner:
                     await asyncio.sleep(10)
         finally:
-            fence_inner_cancelled = inner.cancelled
-            fence_outer_cancelled = outer.cancelled
+            fence_inner_cancelled = inner.cancelled_by(EXTERNAL_CODE)
+            fence_outer_cancelled = outer.cancelled_by(EXTERNAL_CODE)
 
     task = asyncio.get_running_loop().create_task(task_body())
     await asyncio.sleep(0)
@@ -125,8 +125,8 @@ async def test__nested_fence__when_external_cancel_no_triggers__then_clean_propa
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert not fence_inner_cancelled
-    assert not fence_outer_cancelled
+    assert fence_inner_cancelled
+    assert fence_outer_cancelled
 
 
 # --- Three-deep nesting ---

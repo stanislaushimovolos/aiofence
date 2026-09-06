@@ -3,7 +3,7 @@ from typing import Any
 
 import pytest
 
-from aiofence import EventTrigger, Fence, TimeoutTrigger
+from aiofence import EXTERNAL_CODE, EventTrigger, Fence, TimeoutTrigger
 from aiofence.backends import (
     CancelBackend,
     CancelHandle,
@@ -192,7 +192,7 @@ async def test__anyio_backend__when_entered_for_another_task__then_raises():
 
 
 @pytest.mark.backend("anyio")
-async def test__anyio_handle__when_foreign_cancel_outstanding__then_propagates():
+async def test__anyio_handle__when_foreign_cancel_races_own__then_suppresses_and_absorbs_foreign():
     task = asyncio.current_task()
     assert task is not None
     event = asyncio.Event()
@@ -203,13 +203,13 @@ async def test__anyio_handle__when_foreign_cancel_outstanding__then_propagates()
         loop.call_soon(task.cancel, "outer")  # same tick, right after it: counter goes to 2
 
     loop.call_soon(cut_twice)
-    with pytest.raises(asyncio.CancelledError):
-        with Fence(EventTrigger(event), backend=AnyioBackend()) as fence:
-            await asyncio.sleep(10)
+    with Fence(EventTrigger(event), backend=AnyioBackend()) as fence:
+        await asyncio.sleep(10)
 
-    assert fence.cancelled
-    assert not fence.suppressed
-    assert task.uncancel() == 0  # only the outer cancel was left on the counter
+    assert fence.suppressed
+    assert not fence.cancelled_by(EXTERNAL_CODE)
+    await asyncio.sleep(0)  # nothing is delivered for the outer cancel
+    assert task.uncancel() == 0  # only its count is left on the task
 
 
 async def test__bind_backend__when_active__then_fence_without_backend_uses_it():

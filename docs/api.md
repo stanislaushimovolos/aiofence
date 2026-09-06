@@ -163,12 +163,14 @@ Most code should use `cancelled` — it tells you whether a condition was met. `
 
 `declined_reasons` is a third bucket, not a variant of either: a declined reason never counts as `cancelled`. `FenceCancelled` carries `declined_reasons` / `declined_by()` alongside `cancel_reasons`, since it does not hold the fence.
 
+A cancel the fence did not deliver — an outer anyio scope, an `asyncio.timeout()`, a `task.cancel()` from another task — propagates as it always has: `suppressed` stays `False` and code after the `with` does not run. It is still recorded, as a `CancelType.EXTERNAL` reason under the `EXTERNAL_CODE` constant, so `fence.cancelled_by(EXTERNAL_CODE)` tells an interrupted fence from one whose body completed. The policy is not consulted for it; an outer scope's cancel is not the fence's to decline. Any `CancelledError` that leaves the body without being the fence's own counts — awaiting a cancelled child task inside the body, or an outer fence's trigger on the same task, records `EXTERNAL` on this fence.
+
 Each `CancelReason` has:
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `message` | `str` | Human-readable (e.g. `"timed out after 5s"`) |
-| `cancel_type` | `CancelType` | `TIMEOUT` or `EVENT` |
+| `cancel_type` | `CancelType` | `TIMEOUT`, `EVENT`, or `EXTERNAL` |
 | `code` | `str \| None` | Machine-readable identifier |
 
 ## Common Patterns
@@ -277,7 +279,7 @@ with Fence(TimeoutTrigger(5), EventTrigger(shutdown, code="shutdown")) as fence:
     await work()
 ```
 
-`Fence` always suppresses `CancelledError`. It doesn't raise `FenceCancelled` — for that, use `Fencing.raise_on_cancel()`.
+`Fence` suppresses the `CancelledError` its own trigger caused; an external one propagates. It doesn't raise `FenceCancelled` — for that, use `Fencing.raise_on_cancel()`.
 
 `Fence(*triggers, policy=None)` takes the same `CancelPolicy` that `Fencing.guard()` builds; `unless()` is builder-only sugar over it.
 

@@ -16,6 +16,7 @@ from .backends import (
     set_default_backend,
 )
 from .core import (
+    EXTERNAL_CODE,
     CancelPolicy,
     CancelReason,
     CancelType,
@@ -31,6 +32,7 @@ from .triggers import (
 )
 
 __all__ = [
+    "EXTERNAL_CODE",
     "AnyioBackend",
     "CancelBackend",
     "CancelPolicy",
