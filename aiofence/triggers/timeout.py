@@ -16,6 +16,10 @@ class TimeoutHandle(TriggerHandle):
     def disarm(self) -> None:
         self._handle.cancel()
 
+    @property
+    def deadline(self) -> float:
+        return self._handle.when()
+
 
 class TimeoutTrigger(Trigger):
     def __init__(self, delay: float, *, code: str | None = None) -> None:

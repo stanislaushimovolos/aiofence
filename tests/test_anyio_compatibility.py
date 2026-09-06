@@ -9,6 +9,8 @@ fence whose body completed. It should be recorded as a reason under
 
 Issue 2: ``TimeoutTrigger`` is a bare loop timer on a deadline-less scope, so
 ``anyio.current_effective_deadline()`` inside the fence does not reflect it.
+The fence should advertise its tightest timeout as the scope's deadline while
+the trigger stays the thing that fires.
 """
 
 import asyncio
@@ -182,6 +184,65 @@ async def test__fencing_deadline__when_entered__then_effective_deadline_matches(
 
     with Fencing().deadline(when).move_on_cancel():
         assert anyio.current_effective_deadline() == pytest.approx(when, abs=0.05)
+
+
+async def test__timeout_trigger__when_policy_declines__then_effective_deadline_reset():
+    with Fence(TimeoutTrigger(0.01), policy=lambda _reason: False) as fence:
+        await asyncio.sleep(0.05)
+        assert anyio.current_effective_deadline() == math.inf
+
+    assert fence.declined_reasons[0].cancel_type is CancelType.TIMEOUT
+    assert not fence.cancelled
+
+
+async def test__fence__when_two_timeouts__then_effective_deadline_is_tightest():
+    with Fence(TimeoutTrigger(5), TimeoutTrigger(1)):
+        assert _remaining() == pytest.approx(1, abs=0.05)
+
+
+async def test__fence__when_tighter_timeout_declined__then_looser_advertised():
+    def decline_short(reason: CancelReason) -> bool:
+        return reason.code != "short"
+
+    with Fence(TimeoutTrigger(5), TimeoutTrigger(0.01, code="short"), policy=decline_short):
+        await asyncio.sleep(0.05)
+        assert _remaining() == pytest.approx(5, abs=0.1)
+
+
+async def test__event_trigger__when_alone__then_effective_deadline_untouched():
+    event = asyncio.Event()
+
+    with Fence(EventTrigger(event)):
+        assert anyio.current_effective_deadline() == math.inf
+
+
+async def test__nested_fences__when_outer_timeout_tighter__then_inner_sees_it():
+    with Fence(TimeoutTrigger(1)), Fence(TimeoutTrigger(5)):
+        assert _remaining() == pytest.approx(1, abs=0.05)
+
+
+async def test__nested_fences__when_inner_timeout_tighter__then_inner_wins():
+    with Fence(TimeoutTrigger(5)), Fence(TimeoutTrigger(1)):
+        assert _remaining() == pytest.approx(1, abs=0.05)
+
+
+async def test__fence__when_anyio_task_group_child_inside__then_child_sees_deadline():
+    seen: list[float] = []
+
+    async def child() -> None:
+        seen.append(_remaining())
+
+    with Fence(TimeoutTrigger(1)):
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(child)
+
+    assert seen[0] == pytest.approx(1, abs=0.05)
+
+
+@pytest.mark.backend("native")
+async def test__timeout_trigger__when_native_backend__then_effective_deadline_untouched():
+    with Fence(TimeoutTrigger(1)):
+        assert anyio.current_effective_deadline() == math.inf
 
 
 async def test__timeout_trigger__when_fired__then_effective_deadline_is_past():

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -71,10 +72,17 @@ class TriggerHandle(ABC):
     A live cancellation watch returned by `Trigger.arm()`.
 
     `disarm()` — stops monitoring and cleans up resources.
+    `deadline` — the absolute `loop.time()` at which this watch will fire,
+    if it is a timer; `None` otherwise. The fence advertises the tightest
+    one to its backend so anyio-aware code below can see it.
     """
 
     @abstractmethod
     def disarm(self) -> None: ...
+
+    @property
+    def deadline(self) -> float | None:
+        return None
 
 
 class Fence:
@@ -118,6 +126,7 @@ class Fence:
         self._cancel_reasons: list[CancelReason] = []
         self._declined_reasons: list[CancelReason] = []
         self._handle: CancelHandle | None = None
+        self._advertised = math.inf
         self._cancel_sent = False
         self._armed = False
         self._exited = False
@@ -208,6 +217,7 @@ class Fence:
 
         self._exit_handlers = [source.arm(self._on_trigger) for source in self._triggers]
         self._armed = True
+        self._advertise_deadline()
         return self
 
     def __exit__(
@@ -235,7 +245,10 @@ class Fence:
             self._exit_handlers = []
 
     def _on_trigger(self, reason: CancelReason) -> None:
-        if not self._admit(reason) or self._cancel_sent:
+        if not self._admit(reason):
+            self._advertise_deadline()
+            return
+        if self._cancel_sent:
             return
 
         if asyncio.current_task() is self._current_task:
@@ -245,6 +258,15 @@ class Fence:
             )
 
         self._cancel()
+
+    def _advertise_deadline(self) -> None:
+        now = asyncio.get_running_loop().time()
+        pending = [h.deadline for h in self._exit_handlers if h.deadline is not None]
+        ahead = [when for when in pending if when > now]
+        when = min(ahead) if ahead else math.inf
+        if when != self._advertised:
+            self._advertised = when
+            self.handle.set_deadline(when)
 
     def _admit(self, reason: CancelReason) -> bool:
         """

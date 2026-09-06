@@ -456,3 +456,30 @@ async def test__fence__when_two_tasks_share_event__then_both_cancelled_and_waite
     assert fence2.suppressed
     assert fence2.cancelled
     assert len(event._waiters) == 0
+
+
+# --- TriggerHandle.deadline ---
+
+
+async def test__timeout_trigger__when_armed__then_handle_deadline_is_absolute():
+    loop = asyncio.get_running_loop()
+
+    handle = TimeoutTrigger(1).arm(lambda _reason: None)
+
+    assert handle.deadline == pytest.approx(loop.time() + 1, abs=0.05)
+    handle.disarm()
+
+
+async def test__event_trigger__when_armed__then_handle_deadline_is_none():
+    handle = EventTrigger(asyncio.Event()).arm(lambda _reason: None)
+
+    assert handle.deadline is None
+    handle.disarm()
+
+
+async def test__custom_handle__when_deadline_not_overridden__then_none():
+    class _NoopHandle(TriggerHandle):
+        def disarm(self) -> None:
+            pass
+
+    assert _NoopHandle().deadline is None

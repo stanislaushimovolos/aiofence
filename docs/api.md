@@ -76,6 +76,8 @@ ctx = on_deadline(T + 20, code="sla").timeout(5, code="db")
 # T+20 vs now+5 → minimum wins
 ```
 
+Under the default `AnyioBackend` the merged deadline is also what `anyio.current_effective_deadline()` reports inside the fence, so anyio-aware code below — httpx, Starlette, your own `anyio.fail_after` — sees the budget without being handed it; a tighter outer anyio deadline still wins. The fence's own timer does the cancelling, with its reason and through the policy; a declined timeout stops being advertised. `NativeBackend` has nowhere to show a deadline and ignores it.
+
 `.timeout()` eagerly resolves to an absolute deadline and anchors the `Fencing` to the moment it was called. An anchored `Fencing` is per-operation: it can be opened as many times as needed at the call site, but `bind_fencing()` refuses it. Use `.deadline()` for a budget shared through the context.
 
 Events are never merged — all arm independently. Registrations are deduplicated on the `(event, code)` pair, so the same event under two different codes gives you two triggers and `cancelled_by()` answers `True` for both. The same event under the same code collapses to one.
@@ -285,7 +287,7 @@ with Fence(TimeoutTrigger(5), EventTrigger(shutdown, code="shutdown")) as fence:
 
 ### Cancel backend
 
-How a fence cancels its task is pluggable. The default, `AnyioBackend`, cancels through an `anyio.CancelScope` per fence: shields and locks in anyio-based libraries (httpx, Starlette) hold, their cleanup completes, and fences nest — an inner fence backs off when an outer one has fired. `NativeBackend` is asyncio's own `task.cancel()`, delivered exactly once, and refuses a second fence on the same task with `RuntimeError`:
+How a fence cancels its task is pluggable. The default, `AnyioBackend`, cancels through an `anyio.CancelScope` per fence: shields and locks in anyio-based libraries (httpx, Starlette) hold, their cleanup completes, fences nest — an inner fence backs off when an outer one has fired — and the fence's tightest timeout is the scope's deadline, visible to `anyio.current_effective_deadline()`. `NativeBackend` is asyncio's own `task.cancel()`, delivered exactly once, and refuses a second fence on the same task with `RuntimeError`:
 
 ```python
 from aiofence import NativeBackend, set_default_backend

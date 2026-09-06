@@ -13,10 +13,17 @@ class CancelHandle(ABC):
     `exit(exc_type, exc_val)` — balance whatever `cancel` did and report
     whether the exception leaving the fence body is ours to suppress.
     Always called on fence exit, cancel or not.
+    `set_deadline(when)` — the fence's tightest pending timer, as an absolute
+    `loop.time()`, or `math.inf` once none is pending. Advertisement only:
+    the fence's trigger does the cancelling. A backend with nowhere to show
+    it ignores the call.
     """
 
     @abstractmethod
     def cancel(self, message: str) -> None: ...
+
+    @abstractmethod
+    def set_deadline(self, when: float) -> None: ...
 
     @abstractmethod
     def exit(self, exc_type: type[BaseException] | None, exc_val: BaseException | None) -> bool: ...

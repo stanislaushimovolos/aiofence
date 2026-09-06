@@ -1,6 +1,8 @@
 import asyncio
+import math
 from typing import Any
 
+import anyio
 import pytest
 
 from aiofence import EXTERNAL_CODE, EventTrigger, Fence, TimeoutTrigger
@@ -36,6 +38,10 @@ class RecordingHandle(CancelHandle):
         self._calls.append(("cancel", message))
         self._inner.cancel(message)
 
+    def set_deadline(self, when: float) -> None:
+        self._calls.append(("set_deadline", when))
+        self._inner.set_deadline(when)
+
     def exit(self, exc_type: type[BaseException] | None, exc_val: BaseException | None) -> bool:
         result = self._inner.exit(exc_type, exc_val)
         self._calls.append(("exit", result))
@@ -44,6 +50,9 @@ class RecordingHandle(CancelHandle):
 
 class SuppressingHandle(CancelHandle):
     def cancel(self, message: str) -> None:
+        pass
+
+    def set_deadline(self, when: float) -> None:
         pass
 
     def exit(self, *_args: object) -> bool:
@@ -192,6 +201,44 @@ async def test__anyio_backend__when_entered_for_another_task__then_raises():
 
 
 @pytest.mark.backend("anyio")
+async def test__anyio_handle__when_deadline_passes__then_does_not_cancel_on_its_own():
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+    assert task is not None
+    handle = AnyioBackend().enter(task)
+
+    handle.set_deadline(loop.time() + 0.01)
+    await asyncio.sleep(0.05)
+
+    assert handle.exit(None, None) is False
+    assert task.cancelling() == 0
+
+
+async def test__anyio_handle__when_deadline_set__then_effective_deadline_matches():
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+    assert task is not None
+    handle = AnyioBackend().enter(task)
+    when = loop.time() + 1
+
+    handle.set_deadline(when)
+
+    assert anyio.current_effective_deadline() == when
+    handle.exit(None, None)
+
+
+async def test__native_handle__when_deadline_set__then_ignored():
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+    assert task is not None
+    handle = NativeBackend().enter(task)
+
+    handle.set_deadline(loop.time() + 1)
+
+    assert anyio.current_effective_deadline() == math.inf
+    handle.exit(None, None)
+
+
 async def test__anyio_handle__when_foreign_cancel_races_own__then_suppresses_and_absorbs_foreign():
     task = asyncio.current_task()
     assert task is not None
