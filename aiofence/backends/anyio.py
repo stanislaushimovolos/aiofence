@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from anyio._backends._asyncio import CancelScope as _AsyncioCancelScope
+import anyio
 
 from .abc import CancelBackend, CancelHandle
 
@@ -18,10 +18,8 @@ class AnyioBackend(CancelBackend):
     httpx/httpcore, Starlette — therefore see the fence exactly as they see
     `anyio.fail_after`. See docs/architecture.md, "Cancel Backends".
 
-    The fence's tightest timeout is advertised as the scope's deadline, so
-    `anyio.current_effective_deadline()` below the fence reports it. The
-    scope never fires on that deadline itself — the fence's own timer does,
-    with its reason and through the policy. See `_AdvertisedScope`.
+    The fence's deadline stays in the fence's own timer and is not set on
+    the scope, so `anyio.current_effective_deadline()` does not reflect it.
 
     Nested fences map onto nested scopes: anyio links them on its own
     per-task stack, so an inner fence backs off whenever an outer one has
@@ -43,28 +41,11 @@ class _ScopeHandle(CancelHandle):
         if asyncio.current_task() is not task:
             raise RuntimeError("AnyioBackend must be entered from the task it cancels")
 
-        self._scope = _AdvertisedScope()
+        self._scope = anyio.CancelScope()
         self._scope.__enter__()
 
     def cancel(self, message: str) -> None:
         self._scope.cancel(message)
 
-    def set_deadline(self, when: float) -> None:
-        self._scope.deadline = when
-
     def exit(self, exc_type: type[BaseException] | None, exc_val: BaseException | None) -> bool:
         return bool(self._scope.__exit__(exc_type, exc_val, None))
-
-
-class _AdvertisedScope(_AsyncioCancelScope):
-    """
-    An asyncio-backend `anyio.CancelScope` whose deadline is read but never
-    acted on. `_timeout` is anyio's only consumer that cancels on it; every
-    other reader — `current_effective_deadline`, `checkpoint_if_cancelled` —
-    only inspects it.
-    """
-
-    __slots__ = ()
-
-    def _timeout(self) -> None:
-        pass

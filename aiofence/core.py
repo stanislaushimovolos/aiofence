@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
 from collections.abc import Callable, Iterable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -223,7 +222,6 @@ class Fence:
             reason = _timeout_reason(self._deadline, now, self._deadline_code)
             loop = asyncio.get_running_loop()
             self._timer = loop.call_at(self._deadline, self._on_fire, reason)
-            self.handle.set_deadline(self._deadline)
 
         self._watches = [
             _EventWatch(event, self._on_fire, _event_reason(event, code))
@@ -242,8 +240,6 @@ class Fence:
 
     def _on_fire(self, reason: CancelReason) -> None:
         if not self._admit(reason):
-            if reason.cancel_type is CancelType.TIMEOUT:
-                self.handle.set_deadline(math.inf)
             return
 
         if not self._cancel_sent:

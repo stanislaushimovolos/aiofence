@@ -47,9 +47,6 @@ class _NativeHandle(CancelHandle):
         else:
             self._deliver(message)
 
-    def set_deadline(self, when: float) -> None:
-        pass
-
     def exit(
         self,
         exc_type: type[BaseException] | None,

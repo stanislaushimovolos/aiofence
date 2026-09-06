@@ -75,7 +75,7 @@ await db.save(result or fallback)  # always runs, no shield needed
 
 ### aiofence and anyio
 
-`anyio.CancelScope` is the best cancellation *delivery* mechanism asyncio has: one scope, one deadline, one `cancel()`, shields honoured. What it leaves to you is the layer above delivery. Telling which of several sources fired means one scope per source, a watcher task per event, and two `cancelled_caught` flags rather than a reason you can log or match on; its `cancel(reason)` is a debug string, dropped on the second cancel. Fencing in more than one place means threading the event and the deadline through every signature, because there is no ambient "these are the cancellation sources for this request". There is no way to decline one reason under a precondition, and nothing for ASGI disconnects. `aiofence` is that layer, not a replacement: by default a fence cancels *through* an `anyio.CancelScope`, so the shields httpx and Starlette wrap their cleanup in hold, and the fence's timeout is the scope's deadline, so `anyio.current_effective_deadline()` reports it.
+`anyio.CancelScope` is the best cancellation *delivery* mechanism asyncio has: one scope, one deadline, one `cancel()`, shields honoured. What it leaves to you is the layer above delivery. Telling which of several sources fired means one scope per source, a watcher task per event, and two `cancelled_caught` flags rather than a reason you can log or match on; its `cancel(reason)` is a debug string, dropped on the second cancel. Fencing in more than one place means threading the event and the deadline through every signature, because there is no ambient "these are the cancellation sources for this request". There is no way to decline one reason under a precondition, and nothing for ASGI disconnects. `aiofence` is that layer, not a replacement: by default a fence cancels *through* an `anyio.CancelScope`, so the shields httpx and Starlette wrap their cleanup in hold.
 
 The philosophies also differ, and compose. `anyio` puts one broad `CancelScope` over the operation and shields the parts that must survive. `aiofence` wraps only the expensive, safely interruptible part you *want* cancelled, and lets everything else run unaware. Inside a fence, library shields still hold.
 
@@ -231,6 +231,8 @@ Requires `starlette` (installed with FastAPI) — `pip install aiofence[starlett
 ## Caveats
 
 **Nested Fences need the anyio backend**, which is the default. `NativeBackend` refuses a second `Fence` on the same task with `RuntimeError`; see [#12](https://github.com/stanislaushimovolos/aiofence/issues/12). Under anyio, scopes exit in strict LIFO order, so a fence must not span a `yield` in a generator.
+
+**A fence's deadline is invisible to `anyio.current_effective_deadline()`.** It lives in the fence's own timer, not on the scope: set on the scope, anyio would cancel on it with no reason and no policy. Code below the fence that budgets by the effective deadline does not see the fence's; hand it the deadline explicitly.
 
 **The disconnect dependencies require `DisconnectMiddleware`** and raise `RuntimeError` without it. There is no fallback on purpose — see [Why this is the hard part](#why-this-is-the-hard-part) and [the API guide](docs/api.md#why-the-middleware-is-required).
 
