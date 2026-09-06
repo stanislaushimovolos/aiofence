@@ -3,7 +3,8 @@ import logging
 
 import pytest
 
-from aiofence import CancelReason, EventTrigger, Fence, TimeoutTrigger
+from aiofence import CancelReason, Fence
+from tests.helpers import deadline_in
 
 
 def allow(_: CancelReason) -> bool:
@@ -38,7 +39,7 @@ def two_events() -> tuple[asyncio.Event, asyncio.Event]:
 
 
 async def test__fence__when_policy_allows__then_cancelled():
-    with Fence(TimeoutTrigger(0, code="to"), policy=allow) as fence:
+    with Fence(deadline=deadline_in(0), deadline_code="to", policy=allow) as fence:
         await asyncio.sleep(10)
 
     assert fence.suppressed
@@ -47,7 +48,7 @@ async def test__fence__when_policy_allows__then_cancelled():
 
 
 async def test__fence__when_no_policy__then_declined_reasons_empty():
-    with Fence(TimeoutTrigger(0)) as fence:
+    with Fence(deadline=deadline_in(0)) as fence:
         await asyncio.sleep(10)
 
     assert fence.cancelled
@@ -61,7 +62,7 @@ async def test__fence__when_no_policy__then_declined_reasons_empty():
 async def test__fence__when_policy_declines_pre_check__then_body_runs_on(set_event):
     reached_after_await = False
 
-    with Fence(EventTrigger(set_event, code="ev"), policy=decline) as fence:
+    with Fence(events=[(set_event, "ev")], policy=decline) as fence:
         await asyncio.sleep(0)
         reached_after_await = True
 
@@ -80,7 +81,7 @@ async def test__fence__when_policy_declines_live_trigger__then_body_runs_on():
         event.set()
 
     task = asyncio.create_task(fire())
-    with Fence(EventTrigger(event, code="ev"), policy=decline) as fence:
+    with Fence(events=[(event, "ev")], policy=decline) as fence:
         await asyncio.sleep(0.01)
         reached_after_await = True
     await task
@@ -91,28 +92,31 @@ async def test__fence__when_policy_declines_live_trigger__then_body_runs_on():
 
 
 async def test__fence__when_policy_declines__then_declined_by_other_code_false(set_event):
-    with Fence(EventTrigger(set_event, code="ev"), policy=decline) as fence:
+    with Fence(events=[(set_event, "ev")], policy=decline) as fence:
         await asyncio.sleep(0)
 
     assert not fence.declined_by("other")
 
 
 async def test__fence__when_policy_declines__then_reason_recorded_intact(set_event):
-    with Fence(EventTrigger(set_event, code="ev"), policy=decline) as fence:
+    with Fence(events=[(set_event, "ev")], policy=decline) as fence:
         await asyncio.sleep(0)
 
     reason = fence.declined_reasons[0]
     assert reason.code == "ev"
-    assert reason.message == f"event {set_event!r} triggered"
+    assert reason.message == f"event {set_event!r} set"
 
 
 # --- Pre-check declined still arms ---
 
 
 async def test__fence__when_pre_check_declined_and_live_timeout__then_timeout_fires(set_event):
-    triggers = (EventTrigger(set_event, code="ev"), TimeoutTrigger(0.01, code="to"))
-
-    with Fence(*triggers, policy=decline_code("ev")) as fence:
+    with Fence(
+        deadline=deadline_in(0.01),
+        deadline_code="to",
+        events=[(set_event, "ev")],
+        policy=decline_code("ev"),
+    ) as fence:
         await asyncio.sleep(10)
 
     assert fence.suppressed
@@ -122,12 +126,12 @@ async def test__fence__when_pre_check_declined_and_live_timeout__then_timeout_fi
 
 
 async def test__fence__when_pre_check_declined__then_no_cancel_scheduled(set_event):
-    with Fence(EventTrigger(set_event, code="ev"), policy=decline) as fence:
+    with Fence(events=[(set_event, "ev")], policy=decline) as fence:
         assert not fence._cancel_sent
-        assert fence._armed
+        assert fence.declined_by("ev")
 
 
-# --- Mixed decisions across triggers ---
+# --- Mixed decisions across events ---
 
 
 async def test__fence__when_two_live_triggers_one_declined__then_allowed_cancels(two_events):
@@ -139,8 +143,8 @@ async def test__fence__when_two_live_triggers_one_declined__then_allowed_cancels
         allowed_event.set()
 
     task = asyncio.create_task(fire())
-    triggers = (EventTrigger(declined_event, code="a"), EventTrigger(allowed_event, code="b"))
-    with Fence(*triggers, policy=decline_code("a")) as fence:
+    events = [(declined_event, "a"), (allowed_event, "b")]
+    with Fence(events=events, policy=decline_code("a")) as fence:
         await asyncio.sleep(10)
     await task
 
@@ -157,8 +161,7 @@ async def test__fence__when_cancel_delivered_then_second_declined__then_recorded
         event.set()
 
     task = asyncio.create_task(fire())
-    triggers = (EventTrigger(event, code="a"), EventTrigger(event, code="b"))
-    with Fence(*triggers, policy=decline_code("b")) as fence:
+    with Fence(events=[(event, "a"), (event, "b")], policy=decline_code("b")) as fence:
         await asyncio.sleep(10)
     await task
 
@@ -178,7 +181,7 @@ async def test__fence__when_reason_produced__then_policy_called_once_with_reason
         seen.append(reason)
         return True
 
-    with Fence(EventTrigger(set_event, code="ev"), policy=policy):
+    with Fence(events=[(set_event, "ev")], policy=policy):
         await asyncio.sleep(10)
 
     assert len(seen) == 1
@@ -193,7 +196,7 @@ async def test__fence__when_policy_not_needed__then_not_called():
         calls += 1
         return True
 
-    with Fence(TimeoutTrigger(100), policy=policy):
+    with Fence(deadline=deadline_in(100), policy=policy):
         pass
 
     assert calls == 0
@@ -204,7 +207,7 @@ async def test__fence__when_policy_not_needed__then_not_called():
 
 async def test__fence__when_policy_raises_on_live_trigger__then_cancel_delivered_and_logged(caplog):
     with caplog.at_level(logging.ERROR, logger="aiofence"):
-        with Fence(TimeoutTrigger(0.001, code="to"), policy=raising) as fence:
+        with Fence(deadline=deadline_in(0.001), deadline_code="to", policy=raising) as fence:
             await asyncio.sleep(10)
 
     assert fence.suppressed
@@ -215,7 +218,7 @@ async def test__fence__when_policy_raises_on_live_trigger__then_cancel_delivered
 
 async def test__fence__when_policy_raises_in_pre_check__then_cancel_scheduled_and_logged(caplog):
     with caplog.at_level(logging.ERROR, logger="aiofence"):
-        with Fence(TimeoutTrigger(0, code="to"), policy=raising) as fence:
+        with Fence(deadline=deadline_in(0), deadline_code="to", policy=raising) as fence:
             await asyncio.sleep(10)
 
     assert fence.suppressed
@@ -224,10 +227,10 @@ async def test__fence__when_policy_raises_in_pre_check__then_cancel_scheduled_an
 
 
 async def test__fence__when_policy_raises_in_pre_check__then_next_fence_enters_normally():
-    with Fence(TimeoutTrigger(0), policy=raising):
+    with Fence(deadline=deadline_in(0), policy=raising):
         await asyncio.sleep(10)
 
-    with Fence(TimeoutTrigger(100)) as following:
+    with Fence(deadline=deadline_in(100)) as following:
         await asyncio.sleep(0)
 
     assert not following.cancelled

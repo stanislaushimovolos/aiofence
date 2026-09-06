@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Any, Self
@@ -30,7 +30,7 @@ class CancelReason:
     # Category of cancellation (TIMEOUT, EVENT, or EXTERNAL).
     cancel_type: CancelType
     # Optional machine-readable identifier for programmatic matching.
-    # Set via trigger's `code` param. Works with StrEnum for type safety.
+    # The `code` the deadline or event was declared with. Works with StrEnum.
     # A cancel the fence did not deliver is recorded under `EXTERNAL_CODE`.
     code: str | None = None
 
@@ -43,56 +43,25 @@ _EXTERNAL_REASON = CancelReason(
 )
 
 
-CancelCallback = Callable[[CancelReason], None]
 CancelPolicy = Callable[[CancelReason], bool]
 
 logger = logging.getLogger("aiofence")
 
 
-class Trigger(ABC):
-    """
-    Defines a cancellation condition.
-
-    `check()` — synchronous pre-check; if the condition is already met,
-    cancellation is scheduled immediately without arming.
-
-    `arm(callback)` — starts async monitoring (callbacks, timers, etc).
-    Returns a `TriggerHandle` responsible for cleanup.
-    """
-
-    @abstractmethod
-    def check(self) -> CancelReason | None: ...
-
-    @abstractmethod
-    def arm(self, on_cancel: CancelCallback) -> TriggerHandle: ...
-
-
-class TriggerHandle(ABC):
-    """
-    A live cancellation watch returned by `Trigger.arm()`.
-
-    `disarm()` — stops monitoring and cleans up resources.
-    `deadline` — the absolute `loop.time()` at which this watch will fire,
-    if it is a timer; `None` otherwise. The fence advertises the tightest
-    one to its backend so anyio-aware code below can see it.
-    """
-
-    @abstractmethod
-    def disarm(self) -> None: ...
-
-    @property
-    def deadline(self) -> float | None:
-        return None
-
-
 class Fence:
     """
-    Sync context manager that arms triggers against the current task.
+    Sync context manager that cancels the current task when its deadline
+    passes or one of its events is set.
+
+    `deadline` is an absolute `loop.time()` value; `events` are
+    `(event, code)` pairs, each reported under its own code. A deadline
+    already past or an event already set at `__enter__` cancels the body
+    at its first `await`.
 
     Suppression semantics (follows anyio CancelScope model):
-    __exit__ suppresses the CancelledError its own trigger caused — never
-    raises, never propagates it. Caller inspects `fence.suppressed` /
-    `fence.cancel_reasons` after the block. This keeps the cancel counter
+    __exit__ suppresses the CancelledError its own deadline or event caused
+    — never raises, never propagates it. Caller inspects `fence.suppressed`
+    / `fence.cancel_reasons` after the block. This keeps the cancel counter
     balanced and avoids CancelledError-with-counter-zero, which would
     confuse TaskGroup and nested asyncio.timeout scopes.
 
@@ -114,21 +83,25 @@ class Fence:
 
     def __init__(
         self,
-        *triggers: Trigger,
+        *,
+        deadline: float | None = None,
+        deadline_code: str | None = None,
+        events: Iterable[tuple[asyncio.Event, str | None]] = (),
         policy: CancelPolicy | None = None,
         backend: CancelBackend | None = None,
     ) -> None:
-        self._triggers = triggers
+        self._deadline = deadline
+        self._deadline_code = deadline_code
+        self._events = tuple(events)
         self._policy = policy
         self._backend = backend if backend is not None else get_default_backend()
         self._current_task: asyncio.Task[Any] | None = None
-        self._exit_handlers: list[TriggerHandle] = []
+        self._timer: asyncio.TimerHandle | None = None
+        self._watches: list[_EventWatch] = []
         self._cancel_reasons: list[CancelReason] = []
         self._declined_reasons: list[CancelReason] = []
         self._handle: CancelHandle | None = None
-        self._advertised = math.inf
         self._cancel_sent = False
-        self._armed = False
         self._exited = False
         self._suppressed = False
 
@@ -156,7 +129,7 @@ class Fence:
     def suppressed(self) -> bool:
         """
         True if the Fence caught and suppressed a CancelledError.
-        False if no trigger fired, or if the trigger fired but the body
+        False if nothing fired, or if something fired but the body
         completed before cancellation was delivered.
         """
         return self._suppressed
@@ -164,9 +137,9 @@ class Fence:
     @property
     def cancelled(self) -> bool:
         """
-        True if any trigger fired, even if the body completed
-        before cancellation was delivered, or if a cancel from outside
-        the fence tore the body down (`cancelled_by(EXTERNAL_CODE)`).
+        True if the deadline passed or an event was set, even if the body
+        completed before cancellation was delivered, or if a cancel from
+        outside the fence tore the body down (`cancelled_by(EXTERNAL_CODE)`).
         """
         return len(self._cancel_reasons) > 0
 
@@ -206,18 +179,15 @@ class Fence:
         self._current_task = task
         _active_fences.push(self)
 
-        for source in self._triggers:
-            reason = source.check()
-            if reason is not None:
-                self._admit(reason)
+        now = asyncio.get_running_loop().time()
+        for reason in self._due(now):
+            self._admit(reason)
 
         if self._cancel_reasons:
             self._cancel()
             return self
 
-        self._exit_handlers = [source.arm(self._on_trigger) for source in self._triggers]
-        self._armed = True
-        self._advertise_deadline()
+        self._arm(now)
         return self
 
     def __exit__(
@@ -227,9 +197,7 @@ class Fence:
         exc_tb: object,
     ) -> bool:
         self._exited = True
-        if self._armed:
-            for guard in self._exit_handlers:
-                guard.disarm()
+        self._disarm()
 
         try:
             self._suppressed = self.handle.exit(exc_type, exc_val)
@@ -242,31 +210,44 @@ class Fence:
             # remove references to allow GC collect objects
             self._current_task = None
             self._handle = None
-            self._exit_handlers = []
 
-    def _on_trigger(self, reason: CancelReason) -> None:
+    def _due(self, now: float) -> list[CancelReason]:
+        due = []
+        if self._deadline is not None and self._deadline <= now:
+            due.append(_timeout_reason(self._deadline, now, self._deadline_code))
+        due.extend(_event_reason(event, code) for event, code in self._events if event.is_set())
+        return due
+
+    def _arm(self, now: float) -> None:
+        if self._deadline is not None and self._deadline > now:
+            reason = _timeout_reason(self._deadline, now, self._deadline_code)
+            loop = asyncio.get_running_loop()
+            self._timer = loop.call_at(self._deadline, self._on_fire, reason)
+            self.handle.set_deadline(self._deadline)
+
+        self._watches = [
+            _EventWatch(event, self._on_fire, _event_reason(event, code))
+            for event, code in self._events
+            if not event.is_set()
+        ]
+
+    def _disarm(self) -> None:
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+
+        for watch in self._watches:
+            watch.disarm()
+        self._watches = []
+
+    def _on_fire(self, reason: CancelReason) -> None:
         if not self._admit(reason):
-            self._advertise_deadline()
+            if reason.cancel_type is CancelType.TIMEOUT:
+                self.handle.set_deadline(math.inf)
             return
-        if self._cancel_sent:
-            return
 
-        if asyncio.current_task() is self._current_task:
-            raise asyncio.InvalidStateError(
-                "Trigger callback fired synchronously inside the task. "
-                "Trigger.arm() callbacks must fire from the event loop, not inline."
-            )
-
-        self._cancel()
-
-    def _advertise_deadline(self) -> None:
-        now = asyncio.get_running_loop().time()
-        pending = [h.deadline for h in self._exit_handlers if h.deadline is not None]
-        ahead = [when for when in pending if when > now]
-        when = min(ahead) if ahead else math.inf
-        if when != self._advertised:
-            self._advertised = when
-            self.handle.set_deadline(when)
+        if not self._cancel_sent:
+            self._cancel()
 
     def _admit(self, reason: CancelReason) -> bool:
         """
@@ -299,12 +280,57 @@ class Fence:
         self.handle.cancel(self._cancel_reasons[0].message)
 
 
+def _timeout_reason(deadline: float, now: float, code: str | None) -> CancelReason:
+    return CancelReason(
+        message=f"timed out after {max(0.0, deadline - now):.3g}s",
+        cancel_type=CancelType.TIMEOUT,
+        code=code,
+    )
+
+
+def _event_reason(event: asyncio.Event, code: str | None) -> CancelReason:
+    return CancelReason(
+        message=f"event {event!r} set",
+        cancel_type=CancelType.EVENT,
+        code=code,
+    )
+
+
 def _is_cancelled(exc: BaseException | None) -> bool:
     if isinstance(exc, asyncio.CancelledError):
         return True
     if isinstance(exc, BaseExceptionGroup):
         return exc.subgroup(asyncio.CancelledError) is not None
     return False
+
+
+class _EventWatch:
+    """
+    Fires `on_fire(reason)` from the loop when `event` is set. A future
+    subscribed straight to `Event._waiters` — what `Event.wait()` does
+    internally — instead of a watcher task.
+    """
+
+    def __init__(
+        self,
+        event: asyncio.Event,
+        on_fire: Callable[[CancelReason], None],
+        reason: CancelReason,
+    ) -> None:
+        self._event = event
+        self._fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._disarmed = False
+        self._fut.add_done_callback(lambda _: None if self._disarmed else on_fire(reason))
+        event._waiters.append(self._fut)
+
+    def disarm(self) -> None:
+        self._disarmed = True
+        # Event.set() resolves futures but doesn't remove them from _waiters
+        with suppress(ValueError):
+            self._event._waiters.remove(self._fut)
+
+        if not self._fut.done():
+            self._fut.cancel()
 
 
 class _ActiveFences:

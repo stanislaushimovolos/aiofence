@@ -19,7 +19,7 @@ For architecture, core concepts, cancellation flow, and design decisions see @do
 ## API Overview
 
 ```python
-with Fence(TimeoutTrigger(30), EventTrigger(shutdown, code="shutdown")) as fence:
+with Fence(deadline=loop.time() + 30, events=[(shutdown, "shutdown")]) as fence:
     await do_work()
 
 if fence.cancelled:
@@ -31,7 +31,7 @@ with get_current_fencing().unless(generation.is_done, code="disconnect").move_on
     ...
 ```
 
-Core types: `Fence`, `Trigger`, `TriggerHandle`, `CancelReason`, `CancelType`, `CancelPolicy`. Built-in triggers: `TimeoutTrigger`, `EventTrigger`.
+Core types: `Fence`, `Fencing`, `CancelReason`, `CancelType`, `CancelPolicy`. A fence's sources are one absolute deadline and any number of `(event, code)` pairs.
 
 ## Workflow
 

@@ -24,7 +24,7 @@ with on_event(shutdown, code="shutdown").move_on_cancel() as fence:
 
 ## Concepts
 
-Every cancellation source is a **trigger**. You declare triggers once at the boundary using a **Fencing** builder, then materialize them into a context manager. Inside the block, code runs normally — no need to thread events, flags, or tokens through call signatures.
+A fence has two kinds of cancellation source: one absolute **deadline** — the tightest of the timeouts and deadlines declared — and any number of **events**, each under its own `code`. You declare them once at the boundary using a **Fencing** builder, then materialize them into a context manager. Inside the block, code runs normally — no need to thread events, flags, or tokens through call signatures.
 
 After the block, inspect `fence.cancelled`, `fence.cancel_reasons`, or `fence.cancelled_by(code)` to decide what to do.
 
@@ -38,7 +38,7 @@ Use the factory functions — each returns a `Fencing` builder:
 | `on_deadline(when, *, code=None)` | Absolute monotonic time (`loop.time()` based) |
 | `on_event(event, *, code=None)` | Cancel when `asyncio.Event` is set |
 
-The `code` parameter is an optional machine-readable identifier. Use it to distinguish which trigger fired via `fence.cancelled_by(code)`. Works well with `StrEnum` for type safety.
+The `code` parameter is an optional machine-readable identifier. Use it to distinguish which source fired via `fence.cancelled_by(code)`. Works well with `StrEnum` for type safety.
 
 ## Chaining Conditions
 
@@ -80,11 +80,11 @@ Under the default `AnyioBackend` the merged deadline is also what `anyio.current
 
 `.timeout()` eagerly resolves to an absolute deadline and anchors the `Fencing` to the moment it was called. An anchored `Fencing` is per-operation: it can be opened as many times as needed at the call site, but `bind_fencing()` refuses it. Use `.deadline()` for a budget shared through the context.
 
-Events are never merged — all arm independently. Registrations are deduplicated on the `(event, code)` pair, so the same event under two different codes gives you two triggers and `cancelled_by()` answers `True` for both. The same event under the same code collapses to one.
+Events are never merged — all arm independently. Registrations are deduplicated on the `(event, code)` pair, so the same event under two different codes gives you two entries and `cancelled_by()` answers `True` for both. The same event under the same code collapses to one.
 
 ### Guarding cancellation
 
-A trigger firing is not always a reason to cancel. A streaming proxy wants the client's disconnect to cancel the upstream read while the answer is still being generated, but once the finish reason has arrived it wants to keep draining — clients routinely hang up the moment they have the chunk they were waiting for, and the trailing usage frame that gets billed is still on the wire. Same trigger, different decision, depending on state only the fence's user knows at fire time.
+A source firing is not always a reason to cancel. A streaming proxy wants the client's disconnect to cancel the upstream read while the answer is still being generated, but once the finish reason has arrived it wants to keep draining — clients routinely hang up the moment they have the chunk they were waiting for, and the trailing usage frame that gets billed is still on the wire. Same event, different decision, depending on state only the fence's user knows at fire time.
 
 `.unless()` declines reasons while a precondition holds. Scope it to one code so the rest of the fence — typically the timeout — keeps cancelling:
 
@@ -113,8 +113,8 @@ with get_current_fencing().guard(policy).move_on_cancel() as fence:
 
 Semantics:
 
-- **Consulted once per reason**, at the moment it is produced — the pre-check on entry or the live trigger callback. A declined fire is consumed, not re-evaluated: a trigger fires once per arming, so "decline now, cancel later" is the caller's job, read `declined_by()` after the block.
-- **A declined pre-check still arms** the other triggers, so a live timeout keeps working when a pre-set event is declined.
+- **Consulted once per reason**, at the moment it is produced — the pre-check on entry or the live callback. A declined fire is consumed, not re-evaluated: a source fires once per arming, so "decline now, cancel later" is the caller's job, read `declined_by()` after the block.
+- **A declined pre-check still arms** the other sources, so a live timeout keeps working when a pre-set event is declined.
 - **Guards compose with AND** and short-circuit. A guard added to a builder that already has one can only decline more, never less.
 - **Inherited by derivation**, like events and deadlines. A guard bound on the ambient fencing applies to every fence built below it, and there is no way to remove one — fence on a fresh `Fencing()` to escape it.
 - **Runs inside the loop callback**, so it must be sync and cheap. A policy that raises is logged under the `aiofence` logger and treated as `True` — cancelling is the safe default.
@@ -154,18 +154,18 @@ After the block, the `Fence` has:
 
 | Property / Method | Type | Description |
 |-------------------|------|-------------|
-| `fence.cancelled` | `bool` | `True` if any trigger fired |
+| `fence.cancelled` | `bool` | `True` if any source fired |
 | `fence.suppressed` | `bool` | `True` if `CancelledError` was caught and suppressed |
 | `fence.cancel_reasons` | `tuple[CancelReason, ...]` | All reasons that fired |
-| `fence.cancelled_by(code)` | `bool` | Did a specific trigger fire? |
+| `fence.cancelled_by(code)` | `bool` | Did a specific source fire? |
 | `fence.declined_reasons` | `tuple[CancelReason, ...]` | Reasons a `guard` / `unless` policy rejected; they never cancelled |
-| `fence.declined_by(code)` | `bool` | Was a specific trigger declined? |
+| `fence.declined_by(code)` | `bool` | Was a specific source declined? |
 
-Most code should use `cancelled` — it tells you whether a condition was met. `suppressed` differs only when a trigger fires but the body completes synchronously before `CancelledError` is delivered (pre-triggered sync body). In that case `cancelled` is `True` but `suppressed` is `False`.
+Most code should use `cancelled` — it tells you whether a condition was met. `suppressed` differs only when a source fires but the body completes synchronously before `CancelledError` is delivered (pre-triggered sync body). In that case `cancelled` is `True` but `suppressed` is `False`.
 
 `declined_reasons` is a third bucket, not a variant of either: a declined reason never counts as `cancelled`. `FenceCancelled` carries `declined_reasons` / `declined_by()` alongside `cancel_reasons`, since it does not hold the fence.
 
-A cancel the fence did not deliver — an outer anyio scope, an `asyncio.timeout()`, a `task.cancel()` from another task — propagates as it always has: `suppressed` stays `False` and code after the `with` does not run. It is still recorded, as a `CancelType.EXTERNAL` reason under the `EXTERNAL_CODE` constant, so `fence.cancelled_by(EXTERNAL_CODE)` tells an interrupted fence from one whose body completed. The policy is not consulted for it; an outer scope's cancel is not the fence's to decline. Any `CancelledError` that leaves the body without being the fence's own counts — awaiting a cancelled child task inside the body, or an outer fence's trigger on the same task, records `EXTERNAL` on this fence.
+A cancel the fence did not deliver — an outer anyio scope, an `asyncio.timeout()`, a `task.cancel()` from another task — propagates as it always has: `suppressed` stays `False` and code after the `with` does not run. It is still recorded, as a `CancelType.EXTERNAL` reason under the `EXTERNAL_CODE` constant, so `fence.cancelled_by(EXTERNAL_CODE)` tells an interrupted fence from one whose body completed. The policy is not consulted for it; an outer scope's cancel is not the fence's to decline. Any `CancelledError` that leaves the body without being the fence's own counts — awaiting a cancelled child task inside the body, or an outer fence's own cancel on the same task, records `EXTERNAL` on this fence.
 
 Each `CancelReason` has:
 
@@ -223,7 +223,7 @@ with ctx.move_on_cancel() as f2:
 
 **Note:** `.timeout()` anchors the builder to the moment it was called, so every fence built from it shares that one deadline. That is what you want within a single operation, and a stale clock if the builder is kept at module level and reused across requests. Call `.timeout()` fresh each time, or use `.deadline()` where the budget is genuinely shared.
 
-### Multiple triggers
+### Multiple sources
 
 ```python
 with (
@@ -272,18 +272,19 @@ async def process_with_extra():
 
 ## Low-Level API: Fence
 
-`Fence` is the underlying context manager. Use it directly when you need full control over trigger instances:
+`Fence` is the underlying context manager; `Fencing` is sugar over it. It takes one absolute deadline and `(event, code)` pairs, resolved at the call site:
 
 ```python
-from aiofence import Fence, TimeoutTrigger, EventTrigger
+from aiofence import Fence
 
-with Fence(TimeoutTrigger(5), EventTrigger(shutdown, code="shutdown")) as fence:
+loop = asyncio.get_running_loop()
+with Fence(deadline=loop.time() + 5, events=[(shutdown, "shutdown")]) as fence:
     await work()
 ```
 
-`Fence` suppresses the `CancelledError` its own trigger caused; an external one propagates. It doesn't raise `FenceCancelled` — for that, use `Fencing.raise_on_cancel()`.
+`Fence` suppresses the `CancelledError` its own deadline or event caused; an external one propagates. It doesn't raise `FenceCancelled` — for that, use `Fencing.raise_on_cancel()`.
 
-`Fence(*triggers, policy=None)` takes the same `CancelPolicy` that `Fencing.guard()` builds; `unless()` is builder-only sugar over it.
+`Fence(deadline=None, deadline_code=None, events=(), policy=None, backend=None)` takes the same `CancelPolicy` that `Fencing.guard()` builds; `unless()` is builder-only sugar over it.
 
 ### Cancel backend
 
@@ -376,7 +377,7 @@ fence.cancelled_by("disconnect")   # True
 fence.cancelled_by("client_gone")  # True
 ```
 
-Registering the same event under the *same* code twice collapses to a single trigger — which is exactly what happens when a route declares `DisconnectFencing` on top of the middleware's default binding.
+Registering the same event under the *same* code twice collapses to a single entry — which is exactly what happens when a route declares `DisconnectFencing` on top of the middleware's default binding.
 
 #### When the channel fails
 
@@ -384,9 +385,9 @@ If `receive()` raises — a transport error, or `BaseHTTPMiddleware` rejecting a
 
 The middleware records the exception and re-raises it from the next downstream `receive()` once the buffered body has been drained, at the point where the application actually reads, and it never replaces the application's own exception. If nothing ever reads again it is logged at `WARNING` on the `aiofence.contrib.starlette` logger when the request ends.
 
-### Composing with other triggers
+### Composing with other sources
 
-The returned `Fencing` inherits from the current context, so you can chain additional triggers:
+The returned `Fencing` inherits from the current context, so you can chain additional sources:
 
 ```python
 @app.get("/work")
@@ -400,7 +401,7 @@ async def handler(fencing: DisconnectFencing):
         return Response(status_code=499)
 ```
 
-Inner code can also access the disconnect trigger via `get_current_fencing()`:
+Inner code can also access the disconnect event via `get_current_fencing()`:
 
 ```python
 @app.get("/work")
@@ -604,7 +605,7 @@ async def handler():                                   # no dependency declared
 
 Three consequences:
 
-- **Any fence built from `get_current_fencing()` is disconnect-aware.** Nothing has to be declared, injected, or threaded through — which is what makes the plain-ASGI and plain-Starlette story work at all. A directly constructed `Fence(...)` arms exactly the triggers it was handed and nothing else.
+- **Any fence built from `get_current_fencing()` is disconnect-aware.** Nothing has to be declared, injected, or threaded through — which is what makes the plain-ASGI and plain-Starlette story work at all. A directly constructed `Fence(...)` arms exactly the deadline and events it was handed and nothing else.
 - **Exception handlers can see it.** FastAPI applies exception handling *outside* its dependency exit stacks, so a dependency-bound fencing is already gone by the time a handler runs — a middleware-bound one is not. This is the only way for a custom exception handler to ask "was this a disconnect?".
 - **Declaring `DisconnectFencing` on top changes nothing.** Same event, same code, and `Fencing.event()` deduplicates on the `(event, code)` pair — one entry, one reason.
 

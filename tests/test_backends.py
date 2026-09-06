@@ -5,7 +5,7 @@ from typing import Any
 import anyio
 import pytest
 
-from aiofence import EXTERNAL_CODE, EventTrigger, Fence, TimeoutTrigger
+from aiofence import EXTERNAL_CODE, Fence
 from aiofence.backends import (
     CancelBackend,
     CancelHandle,
@@ -14,6 +14,7 @@ from aiofence.backends import (
     get_default_backend,
 )
 from aiofence.backends.anyio import AnyioBackend
+from tests.helpers import deadline_in
 
 
 class RecordingBackend(CancelBackend):
@@ -95,10 +96,10 @@ async def test__fence__when_nothing_fires__then_handle_exit_still_called(backend
 
 
 async def test__fence__when_trigger_fires__then_cancels_through_handle_with_reason(backend):
-    with Fence(TimeoutTrigger(0.01), backend=backend) as fence:
+    with Fence(deadline=deadline_in(0.01), backend=backend) as fence:
         await asyncio.sleep(10)
 
-    assert ("cancel", "timed out after 0.01s") in backend.calls
+    assert ("cancel", fence.cancel_reasons[0].message) in backend.calls
     assert backend.calls[-1] == ("exit", True)
     assert fence.suppressed
 
@@ -106,7 +107,7 @@ async def test__fence__when_trigger_fires__then_cancels_through_handle_with_reas
 async def test__fence__when_pre_triggered__then_cancels_through_handle_from_enter(
     backend, set_event
 ):
-    with Fence(EventTrigger(set_event), backend=backend) as fence:
+    with Fence(events=[(set_event, None)], backend=backend) as fence:
         assert backend.calls[-1][0] == "cancel"
         await asyncio.sleep(10)
 
@@ -117,7 +118,7 @@ async def test__fence__when_two_triggers_fire__then_handle_cancelled_once(backen
     event1 = asyncio.Event()
     event2 = asyncio.Event()
 
-    with Fence(EventTrigger(event1), EventTrigger(event2), backend=backend) as fence:
+    with Fence(events=[(event1, None), (event2, None)], backend=backend) as fence:
         event1.set()
         event2.set()
         await asyncio.sleep(1)
@@ -128,7 +129,7 @@ async def test__fence__when_two_triggers_fire__then_handle_cancelled_once(backen
 
 
 async def test__fence__when_declined__then_handle_never_cancelled(backend, set_event):
-    with Fence(EventTrigger(set_event), policy=lambda _: False, backend=backend) as fence:
+    with Fence(events=[(set_event, None)], policy=lambda _: False, backend=backend) as fence:
         await asyncio.sleep(0)
 
     assert [c[0] for c in backend.calls] == ["enter", "exit"]
@@ -250,7 +251,7 @@ async def test__anyio_handle__when_foreign_cancel_races_own__then_suppresses_and
         loop.call_soon(task.cancel, "outer")  # same tick, right after it: counter goes to 2
 
     loop.call_soon(cut_twice)
-    with Fence(EventTrigger(event), backend=AnyioBackend()) as fence:
+    with Fence(events=[(event, None)], backend=AnyioBackend()) as fence:
         await asyncio.sleep(10)
 
     assert fence.suppressed
@@ -350,7 +351,7 @@ async def test__fence__when_nested__then_inner_backend_enters_nested(
 
 
 async def test__fence__when_nested_entry_refused__then_outer_stack_unchanged() -> None:
-    with Fence(TimeoutTrigger(0), backend=AnyioBackend()) as outer:
+    with Fence(deadline=deadline_in(0), backend=AnyioBackend()) as outer:
         with (
             pytest.raises(RuntimeError, match="does not support nested"),
             Fence(backend=NativeBackend()),
@@ -362,8 +363,8 @@ async def test__fence__when_nested_entry_refused__then_outer_stack_unchanged() -
 
 
 async def test__fence__when_native_outer_and_anyio_inner__then_inner_nests() -> None:
-    with Fence(TimeoutTrigger(10), backend=NativeBackend()) as outer:
-        with Fence(TimeoutTrigger(0), backend=AnyioBackend()) as inner:
+    with Fence(deadline=deadline_in(10), backend=NativeBackend()) as outer:
+        with Fence(deadline=deadline_in(0), backend=AnyioBackend()) as inner:
             await asyncio.sleep(10)
         await asyncio.sleep(0)
 
@@ -376,8 +377,8 @@ async def test__fence__when_native_outer_and_anyio_inner_share_trigger__then_out
 ):
     shutdown = asyncio.Event()
 
-    with Fence(EventTrigger(shutdown), backend=NativeBackend()) as outer:
-        with Fence(EventTrigger(shutdown), backend=AnyioBackend()) as inner:
+    with Fence(events=[(shutdown, None)], backend=NativeBackend()) as outer:
+        with Fence(events=[(shutdown, None)], backend=AnyioBackend()) as inner:
             shutdown.set()
             await asyncio.sleep(10)
 

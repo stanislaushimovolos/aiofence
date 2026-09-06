@@ -2,9 +2,8 @@
 
 ## Module Layout
 
-- **`core.py`** — abstractions and core runtime: `CancelReason`, `CancelType`, `CancelPolicy`, `Trigger`, `TriggerHandle`, `Fence`
-- **`backends/`** — how a fence cancels its task, behind the `CancelBackend` / `CancelHandle` ABCs. `AnyioBackend` (default, `backends/anyio.py`) is an `anyio.CancelScope` per fence and the only backend that nests; `NativeBackend` is asyncio's own `cancel()`/`uncancel()` protocol and refuses a second fence on one task. `set_default_backend()` selects one process-wide, `bind_backend()` for a context and the tasks it spawns, `Fence(backend=...)` per fence; triggers, policy and reasons are unaffected by the choice. See [Cancel Backends](#cancel-backends)
-- **`triggers/`** — built-in trigger implementations: `TimeoutTrigger`/`TimeoutHandle`, `EventTrigger`/`EventHandle`
+- **`core.py`** — abstractions and core runtime: `CancelReason`, `CancelType`, `CancelPolicy`, `Fence`
+- **`backends/`** — how a fence cancels its task, behind the `CancelBackend` / `CancelHandle` ABCs. `AnyioBackend` (default, `backends/anyio.py`) is an `anyio.CancelScope` per fence and the only backend that nests; `NativeBackend` is asyncio's own `cancel()`/`uncancel()` protocol and refuses a second fence on one task. `set_default_backend()` selects one process-wide, `bind_backend()` for a context and the tasks it spawns, `Fence(backend=...)` per fence; deadline, events, policy and reasons are unaffected by the choice. See [Cancel Backends](#cancel-backends)
 - **`contrib/`** — optional framework integrations (Starlette / FastAPI). Never imported by the core package, so it stays dependency-free; see [api.md](api.md)
   - **`contrib/starlette/`** — the ASGI side, split by direction: one module writes, the other reads. Import from the package; the split is internal
     - **`starlette/middleware.py`** — `DisconnectMiddleware`, the single reader of a request's ASGI receive channel: `_RequestChannel` reads the channel in one task, replays body messages, records the disconnect — from the receive side or from a `send` the server refuses — and owns the event the middleware publishes; `_ResponsePhase` tracks how far the response has got and answers whether it had already ended. It also binds the event on the ambient `Fencing` under `DISCONNECT_CODE`, so anything below it that fences via `get_current_fencing()` is disconnect-aware with no wiring, and binds its `backend` — `AnyioBackend` unless told otherwise — for the request, so every fence below cancels through anyio and Starlette's and httpx's shields hold. Installing the middleware is the opt-in; work that must outlive the client fences on a fresh `Fencing()` instead. `watch` (`WatchPredicate`) narrows *which requests* it owns at all — asked before the app runs, because channel ownership cannot be retrofitted, and therefore above the router, where no route exists yet. Declining is total: no event, no binding, nothing below can ask. The optional `on_disconnect` (`DisconnectCallback`) is an observability hook rather than part of the mechanism: it fires only when the event is set, after the app returned and therefore after routing filled the scope in place, and its exceptions are logged, not propagated
@@ -14,13 +13,12 @@
 
 ## API
 
-For usage guide, examples, and custom trigger documentation see [api.md](api.md).
+For usage guide and examples see [api.md](api.md).
 
 ## Core Concepts
 
-- **`Trigger`** — abstract cancellation condition. `check()` for synchronous pre-check, `arm(callback)` for async monitoring. Returns a `TriggerHandle`.
-- **`TriggerHandle`** — live watch returned by `Trigger.arm()`. `disarm()` stops monitoring. `deadline` is the absolute `loop.time()` a timer-based watch will fire at, `None` for the rest; the fence advertises the tightest one through `handle.set_deadline()`.
-- **`Fence`** — sync context manager that arms triggers against the current task. Suppresses its own `CancelledError` on exit; any other is recorded as EXTERNAL and propagates. Caller inspects `fence.suppressed` / `fence.cancel_reasons` after the block.
+- **Sources** — a fence has one absolute `deadline` (a `loop.time()` value, reported under `deadline_code`) and any number of `(event, code)` pairs. The deadline is a single loop timer, advertised to the backend through `handle.set_deadline()`; each event is watched by a future subscribed to `Event._waiters` (see [Event Watching Without Tasks](#event-watching-without-tasks)). A source already met at `__enter__` is a pre-check; the rest are armed.
+- **`Fence`** — sync context manager that arms its deadline and events against the current task. Suppresses its own `CancelledError` on exit; any other is recorded as EXTERNAL and propagates. Caller inspects `fence.suppressed` / `fence.cancel_reasons` after the block.
 - **`CancelBackend`** — `enter(task)` returns a `CancelHandle`: `cancel(message)` delivers the fence's one cancel, `exit(exc_type, exc_val)` balances it and says whether the exception leaving the body is the fence's to suppress. `exit` is always called, cancel or not. `set_deadline(when)` advertises the fence's tightest pending timer, `math.inf` once none is pending; it is information, never a cancel — `AnyioBackend` sets it on the scope, `NativeBackend` ignores it. `enter_nested(task)` is called instead for a fence entered while another is active on the same task: `AnyioBackend` returns another scope, `NativeBackend` raises `RuntimeError`. `NativeBackend`'s handle encapsulates one `cancel()`/`uncancel()` cycle, tracks whether a deferred cancel fired and settles ownership by the counter.
 - **`CancelReason`** — frozen dataclass with `message` and `cancel_type` (TIMEOUT, EVENT, or EXTERNAL). An EXTERNAL reason under `EXTERNAL_CODE` is recorded at exit when a `CancelledError` — plain or inside an exception group — leaves the body and the backend did not claim it; the backend decides, the fence only records. It propagates rather than being suppressed.
 - **`CancelPolicy`** — `Callable[[CancelReason], bool]` consulted once per reason before the cancel is delivered. `False` routes the reason to `fence.declined_reasons` and cancels nothing; a raise is logged and counts as `True`. `Fencing.guard()` composes them with AND, `Fencing.unless()` is sugar over `guard()`.
@@ -29,10 +27,10 @@ For usage guide, examples, and custom trigger documentation see [api.md](api.md)
 
 0. `Fence.__enter__` requires a running task — `task.cancel()` is the only mechanism there is. Entered from a loop callback or from a worker thread (a sync FastAPI `def` handler), it raises `RuntimeError`
 1. `Fence.__enter__` calls `backend.enter(task)`; the native handle snapshots `task.cancelling()` as the baseline counter
-2. Runs `check()` on all triggers — each reason passes the policy first; if any is accepted, records it and calls `handle.cancel()`. Called from inside the task, the native handle defers `task.cancel()` via `call_soon`
-3. If no accepted pre-triggers, arms all triggers (an already-set event arms as a no-op); when one fires, the callback passes the reason through the policy, records it and calls `handle.cancel()`, which from a loop callback is an immediate `task.cancel()`
+2. Checks which sources are already met — a past deadline, a set event; each reason passes the policy first; if any is accepted, records it and calls `handle.cancel()`. Called from inside the task, the native handle defers `task.cancel()` via `call_soon`
+3. If no accepted pre-check, arms the rest — the deadline as a loop timer, each unset event as a waiter future; when one fires, the callback passes the reason through the policy, records it and calls `handle.cancel()`, which from a loop callback is an immediate `task.cancel()`
 4. Body runs. At the next `await`, `CancelledError` is raised inside the body
-5. `Fence.__exit__` disarms all triggers, then calls `handle.exit()`; for the native handle:
+5. `Fence.__exit__` cancels the timer and removes the waiters, then calls `handle.exit()`; for the native handle:
    - If cancel never fired (sync body completed first) — rescinds pending `call_soon`, returns `False`
    - If cancel fired and counter returned to baseline — `uncancel()` + suppress (`return True`)
    - If counter above baseline — outer scope also cancelled, don't suppress (`return False`)
@@ -43,7 +41,7 @@ Uses asyncio's `cancel()`/`uncancel()` counter protocol. Each `Fence` snapshots 
 
 ## Suppression Semantics
 
-Fence **always suppresses** the `CancelledError` its own trigger caused. `__exit__` raises nothing of its own; a cancel that is not the fence's propagates untouched, recorded as EXTERNAL. This follows anyio's `CancelScope` model.
+Fence **always suppresses** the `CancelledError` its own deadline or event caused. `__exit__` raises nothing of its own; a cancel that is not the fence's propagates untouched, recorded as EXTERNAL. This follows anyio's `CancelScope` model.
 
 ### Why suppress instead of raising
 
@@ -54,7 +52,7 @@ Three alternatives were considered and rejected. All lose worker control (code a
    ```python
    async with asyncio.TaskGroup() as tg:
        tg.create_task(important_work())
-       with Fence(TimeoutTrigger(1)) as fence:
+       with Fence(deadline=loop.time() + 1) as fence:
            await asyncio.sleep(10)
        # FenceCancelled propagates → BaseExceptionGroup([FenceCancelled])
    ```
@@ -65,7 +63,7 @@ Three alternatives were considered and rejected. All lose worker control (code a
 
    ```python
    async with asyncio.timeout(5):    # baseline=0
-       with Fence(TimeoutTrigger(1)) as fence:
+       with Fence(deadline=loop.time() + 1) as fence:
            await asyncio.sleep(10)
        # Fence: cancel() → counter=1, no uncancel
        # timeout fires → cancel() → counter=2, uncancel() → 1
@@ -78,12 +76,12 @@ Suppression is the only approach that preserves worker control and is composable
 
 Python sync context managers cannot skip the body without raising from `__enter__`. If `__enter__` raises, `__exit__` is never called, so counter cleanup can't happen.
 
-Instead, pre-triggered Fences schedule `task.cancel()` via `call_soon` and let the body start. The body is interrupted at the first `await`. If the body has no awaits and completes synchronously, the pending cancel is rescinded — `fence.cancelled` is still `True` (reasons were recorded on entry, so `fence.cancelled` reflects that a trigger fired), but no `CancelledError` is ever delivered.
+Instead, pre-triggered Fences schedule `task.cancel()` via `call_soon` and let the body start. The body is interrupted at the first `await`. If the body has no awaits and completes synchronously, the pending cancel is rescinded — `fence.cancelled` is still `True` (reasons were recorded on entry, so `fence.cancelled` reflects that a source fired), but no `CancelledError` is ever delivered.
 
 ### TaskGroup compatibility
 
 - **Fence inside TaskGroup**: suppresses, counter balanced, TaskGroup never sees `CancelledError`
-- **TaskGroup cancels while Fence is active**: Fence's trigger didn't fire (no cancel was delivered), so `handle.exit()` returns `False` — `CancelledError` propagates to TaskGroup correctly
+- **TaskGroup cancels while Fence is active**: Fence's own sources didn't fire (no cancel was delivered), so `handle.exit()` returns `False` — `CancelledError` propagates to TaskGroup correctly
 - **Both fire simultaneously**: on `NativeBackend` the counter protocol resolves ownership — Fence sees `remaining > baseline`, backs off, TaskGroup claims it. On `AnyioBackend` anyio's verdict stands and the fence suppresses; see [Cancel Backends](#cancel-backends)
 
 ## Deferred Cancel via `call_soon`
@@ -96,7 +94,7 @@ Instead, pre-triggered Fences schedule `task.cancel()` via `call_soon` and let t
 
 `AnyioBackend` enters an `anyio.CancelScope` per fence and cancels through `scope.cancel(message)`. Delivery is then anyio's ([`_deliver_cancellation`](https://github.com/agronholm/anyio/blob/4.12.1/src/anyio/_backends/_asyncio.py#L556-L594)): `task.cancel()` only while the task is suspended on a pending future, retried every loop tick until the scope exits, and skipped while a shielded child scope is active. anyio balances the counter for each cancel it issued and swallows only its own `CancelledError`. That verdict is taken as is; the handle keeps no counter of its own. The cost is one race: an asyncio-native cancel — `TaskGroup`, `asyncio.timeout()`, `task.cancel()` — landing in the same tick as the fence's own is merged by asyncio into the single `CancelledError` already in flight, anyio recognises that error as its own and the fence suppresses it. The outer cancel is lost: `task.cancelling()` stays raised, but no `CancelledError` is ever delivered for it, so an `asyncio.timeout()` that expired in that tick raises no `TimeoutError` and a peer's `task.cancel()` never reaches the task. Every canceller in the Starlette/httpx stack is anyio, so there the race cannot occur. An asyncio-native cancel that lands *first*, or alone, carries no anyio message and propagates as usual.
 
-The scope also carries the fence's deadline. `_ScopeHandle.set_deadline` assigns `scope.deadline`, so `anyio.current_effective_deadline()` below the fence — in the body, in an anyio task group's children, up to the first shield — reports the fence's tightest timeout, and an outer anyio deadline that is tighter still wins. anyio would normally fire its own timer on that deadline and cancel the scope with no reason and no policy consulted; the scope is therefore `_AdvertisedScope`, a subclass of anyio's asyncio `CancelScope` whose `_timeout` hook is a no-op. That hook is the only place anyio acts on a deadline — `current_effective_deadline`, `checkpoint_if_cancelled` and `fail_after` merely read it — so the trigger's own timer stays the one mechanism, and a deadline that has passed or been declined is re-advertised as the next pending timer or `math.inf`. The subclass reaches into `anyio._backends._asyncio`; the test that an advertised deadline never cancels on its own pins that assumption.
+The scope also carries the fence's deadline. `_ScopeHandle.set_deadline` assigns `scope.deadline`, so `anyio.current_effective_deadline()` below the fence — in the body, in an anyio task group's children, up to the first shield — reports the fence's tightest timeout, and an outer anyio deadline that is tighter still wins. anyio would normally fire its own timer on that deadline and cancel the scope with no reason and no policy consulted; the scope is therefore `_AdvertisedScope`, a subclass of anyio's asyncio `CancelScope` whose `_timeout` hook is a no-op. That hook is the only place anyio acts on a deadline — `current_effective_deadline`, `checkpoint_if_cancelled` and `fail_after` merely read it — so the fence's own timer stays the one mechanism, and a declined deadline is re-advertised as `math.inf`. The subclass reaches into `anyio._backends._asyncio`; the test that an advertised deadline never cancels on its own pins that assumption.
 
 What changes for code inside the fence, and only there:
 
@@ -104,9 +102,9 @@ What changes for code inside the fence, and only there:
 |---|---|---|
 | catch `CancelledError`, `await` again | later awaits run undisturbed | re-cancelled at every await until the fence exits |
 | `await` inside `anyio.CancelScope(shield=True)` | interrupted | held until the shield exits |
-| trigger fires in the tick the body's last await resolves | cancel arrives instead of the result | result arrives; body completes, `suppressed` is `False` |
+| the deadline or an event fires in the tick the body's last await resolves | cancel arrives instead of the result | result arrives; body completes, `suppressed` is `False` |
 | fence inside a cancelled anyio task group | fence's cancel may land first and be suppressed | fence defers to the group; body is torn down |
-| `asyncio.TaskGroup` / `asyncio.timeout()` cancels in the tick the fence's own trigger fires | counter says the outer cancel is outstanding; fence propagates | anyio sees only its own cancel; fence suppresses, outer cancel lost |
+| `asyncio.TaskGroup` / `asyncio.timeout()` cancels in the tick the fence's own timer fires | counter says the outer cancel is outstanding; fence propagates | anyio sees only its own cancel; fence suppresses, outer cancel lost |
 | `anyio.current_effective_deadline()` | unaffected by the fence | the fence's tightest timeout, or a tighter outer anyio deadline |
 
 `DisconnectMiddleware` binds `AnyioBackend` for each request it owns, since everything below it runs inside Starlette and usually calls httpx; `backend=NativeBackend()` opts an app out.
@@ -115,7 +113,7 @@ Cleanup after a suppressed cancel belongs after the `with` block on either backe
 
 ## Event Watching Without Tasks
 
-`EventTrigger` subscribes a `Future` directly to `asyncio.Event._waiters` instead of spawning a background task. The future's done callback fires the cancellation. Uses private API but mirrors what `Event.wait()` does internally.
+The fence subscribes a `Future` per event directly to `asyncio.Event._waiters` instead of spawning a background task. The future's done callback fires the cancellation. Uses private API but mirrors what `Event.wait()` does internally.
 
 ## Design Decisions
 
@@ -123,7 +121,7 @@ Cleanup after a suppressed cancel belongs after the `with` block on either backe
 - **Single mode**: No split between "raise" and "suppress" modes. Fence always suppresses its own cancel. If the caller wants to raise, they do it themselves after checking `fence.cancelled` / `fence.suppressed`.
 - **No `CancelledError` subclasses**: `Fence` itself raises nothing of its own. `Fencing.raise_on_cancel()` raises `FenceCancelled`, a plain `Exception` carrying the reasons, but only after the fence has already suppressed the `CancelledError` and the block has exited — so `TaskGroup` and `asyncio.timeout()` never see it as a cancel, and none of the subclass pitfalls above apply.
 - **No scope tree / shielding of our own**: Shielding is asyncio's (`asyncio.shield()`) and ownership against outer scopes is settled by `uncancel()` counting. `AnyioBackend` opts into anyio's scope tree for delivery and for nesting; `NativeBackend` rejects a second fence on one task at `__enter__` ([#12](https://github.com/stanislaushimovolos/aiofence/issues/12)). On both, the fence records reasons and settles ownership the same way.
-- **Deadlines vs timeouts**: `TimeoutTrigger` is a relative timer. `Fencing.deadline()` accepts an absolute `loop.time()` value and merges the tightest. The fence exposes no remaining budget of its own: under `AnyioBackend` it advertises the tightest timer as the scope deadline, so `anyio.current_effective_deadline()` is the way to read it, and under either backend the application keeps the deadline it declared and derives `deadline - loop.time()` when it needs one, e.g. to forward a relative duration to a downstream service as a header.
+- **Deadlines vs timeouts**: `Fencing.timeout()` is relative and resolves eagerly, `Fencing.deadline()` is an absolute `loop.time()` value; the builder merges the tightest into the one deadline a `Fence` takes. The fence exposes no remaining budget of its own: under `AnyioBackend` it advertises that deadline as the scope deadline, so `anyio.current_effective_deadline()` is the way to read it, and under either backend the application keeps the deadline it declared and derives `deadline - loop.time()` when it needs one, e.g. to forward a relative duration to a downstream service as a header.
 
 ## Disconnect Delivery: Replay and Record
 
@@ -145,7 +143,7 @@ Replay settles that both readers are *told*, not who acts first. Under the middl
 
 ## Why This Complexity Is Necessary
 
-Fence is a generalized `asyncio.timeout()`. The stdlib timeout does the same cancel/uncancel/suppress dance — but only for one trigger type and converts to `TimeoutError`. Fence supports arbitrary triggers and suppresses instead of converting.
+Fence is a generalized `asyncio.timeout()`. The stdlib timeout does the same cancel/uncancel/suppress dance — but only for a deadline and converts to `TimeoutError`. Fence adds events, codes and a policy, and suppresses instead of converting.
 
 Every piece exists because asyncio's counter protocol demands it:
 

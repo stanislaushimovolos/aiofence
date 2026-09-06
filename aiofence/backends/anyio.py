@@ -20,7 +20,7 @@ class AnyioBackend(CancelBackend):
 
     The fence's tightest timeout is advertised as the scope's deadline, so
     `anyio.current_effective_deadline()` below the fence reports it. The
-    scope never fires on that deadline itself — the fence's trigger does,
+    scope never fires on that deadline itself — the fence's own timer does,
     with its reason and through the policy. See `_AdvertisedScope`.
 
     Nested fences map onto nested scopes: anyio links them on its own
